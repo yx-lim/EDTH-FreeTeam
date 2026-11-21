@@ -132,6 +132,7 @@ const emit = defineEmits([
 const textInput = ref('')
 const netInput = ref('')
 const logFilter = ref('all')
+const voiceDrawerOpen = ref(false)
 const showRawJson = ref(false)
 const editOpen = ref(false)
 const sosArmed = ref(false)
@@ -171,17 +172,17 @@ Contact: 3 enemy tanks moving east, 200 metres north of Saint-Sulpice church.
 Suspected enemy IED at the corner of rue de Tournon and rue de Vaugirard.`
 
 const EN_PRESETS = [
-  { label: 'S of Saint-Sulpice', text: 'Zero, this is Alpha two, south of the Saint-Sulpice church, over' },
+  { label: '✈ Drone 120 km/h E', text: 'Bravo one, contact, 2 enemy drones flying east at 120 km/h over Pantheon, over' },
   { label: '2 Enemy Tanks E', text: 'Zero, this is Bravo one, contact, two enemy tanks, moving north, 300 metres east of the church, over' },
   { label: '? Tanks at Tower', text: 'Bravo one, contact, 2 enemy tanks at the tower, over' },
-  { label: '100m E Eiffel Tower', text: 'Alpha one, I am 100 meters east of the Eiffel Tower, over' },
+  { label: 'S of Saint-Sulpice', text: 'Zero, this is Alpha two, south of the Saint-Sulpice church, over' },
 ]
 
 const UK_PRESETS = [
-  { label: '🇺🇦 Сокіл на Ромашці', text: 'Вежа, я Сокіл, на Ромашці, без змін, прийом.' },
+  { label: '🇺🇦 Шахед 180 км/год N', text: 'Вежа, я Сокіл, шахед летить на північ 180 км/год над Люксембурзьким палацом, прийом.' },
   { label: '🇺🇦 3 танки Сен-Сюльпіс', text: 'Вежа, я Граніт, бачу 3 ворожих танки біля церкви Сен-Сюльпіс, прийом.' },
   { label: '🇺🇦 Ждун біля Сараю', text: "Вежа, я Граніт, ждун біля Сараю, метрів п'ятдесят на захід, не підходити, прийом." },
-  { label: '🇺🇦 2 людини біля церкви', text: 'Вежа, я Лис, бачимо біля церкви дві людини, прийом.' },
+  { label: '🇺🇦 Сокіл на Ромашці', text: 'Вежа, я Сокіл, на Ромашці, без змін, прийом.' },
 ]
 
 const activePresets = computed(() => (['uk', 'ru'].includes(props.lang) ? UK_PRESETS : EN_PRESETS))
@@ -365,27 +366,28 @@ function onFileChange(ev) {
 
 <template>
   <aside class="command-sidebar" aria-label="Tactical Command Sidebar">
-    <!-- PINNED SECTION 1: Active Unit BFT Header & Guarded 2-Step SOS -->
-    <section class="sidebar-hero-card">
+    <!-- PINNED SECTION 1: Single-Line Active Selected Unit Badge & Guarded 2-Step SOS -->
+    <section class="sidebar-hero-card is-compact">
       <div class="unit-selector-row">
-        <div class="unit-select-wrap" title="Default / active callsign (leave blank to hold unidentified callers)">
+        <div class="unit-select-wrap" title="Active selected unit callsign">
           <span class="unit-status-dot" :class="hasSos ? 'status-sos' : 'status-green'"></span>
           <input
             class="callsign-input"
             list="callsign-list"
             :value="callsign"
-            placeholder="Default callsign (optional)"
-            aria-label="Default callsign"
+            placeholder="Select unit..."
+            aria-label="Active selected unit"
             @input="emit('update:callsign', $event.target.value)"
           />
           <datalist id="callsign-list">
             <option v-for="cs in callsignSuggestions" :key="cs" :value="cs" />
           </datalist>
+          <span v-if="callsign" class="selected-unit-tag">(selected)</span>
           <button
             v-if="callsign"
             type="button"
             class="clear-cs-btn"
-            title="Clear default callsign"
+            title="Clear selected unit"
             @click="emit('update:callsign', '')"
           >
             <X :size="12" />
@@ -403,30 +405,35 @@ function onFileChange(ev) {
           <span>{{ hasSos ? 'CLEAR SOS' : sosArmed ? 'CONFIRM?' : 'SOS' }}</span>
         </button>
       </div>
-
-      <div class="telemetry-grid">
-        <div class="telemetry-cell">
-          <span class="telemetry-label">MGRS GRID</span>
-          <strong class="mono accent-gold">{{ activeGrid || '31U DQ —' }}</strong>
-        </div>
-        <div class="telemetry-cell">
-          <span class="telemetry-label"><Compass :size="11" /> HEADING</span>
-          <div class="heading-stepper mono">
-            <button type="button" title="Rotate FOV 45° left" @click="emit('step-heading', -45)">-</button>
-            <strong>{{ String(Math.round(activeHeading)).padStart(3, '0') }}° {{ headingToCardinal(activeHeading) }}</strong>
-            <button type="button" title="Rotate FOV 45° right" @click="emit('step-heading', 45)">+</button>
-          </div>
-        </div>
-        <div class="telemetry-cell">
-          <span class="telemetry-label">TRAIL DIST</span>
-          <strong class="mono">{{ formatDistance(trailDistanceM) }}</strong>
-        </div>
-      </div>
     </section>
 
-    <!-- PINNED SECTION 2: Hero Push-to-Talk & Tactical Radio Comms Console -->
-    <section class="control-panel">
-      <div class="ptt-module">
+    <!-- PINNED SECTION 2: Collapsible Voice Comms & PTT Drawer (Collapsed by Default) -->
+    <section class="control-panel is-collapsible">
+      <button
+        type="button"
+        class="voice-drawer-toggle"
+        :class="{ 'is-open': voiceDrawerOpen, 'is-tx': listening }"
+        :aria-expanded="voiceDrawerOpen"
+        title="Expand or collapse Voice Comms, Push-to-Talk, Demos & Radio Input"
+        @click="voiceDrawerOpen = !voiceDrawerOpen"
+      >
+        <span class="voice-drawer-left">
+          <Mic :size="14" />
+          <span>VOICE COMMS</span>
+        </span>
+        <span class="voice-drawer-right">
+          <span
+            class="voice-toggle-pill mono"
+            :class="{ 'is-on': voiceDrawerOpen, 'is-tx': listening }"
+          >
+            {{ listening ? 'TX LIVE' : voiceDrawerOpen ? 'TOGGLE • ON' : 'TOGGLE • OFF' }}
+          </span>
+          <ChevronDown v-if="voiceDrawerOpen" :size="14" />
+          <ChevronRight v-else :size="14" />
+        </span>
+      </button>
+
+      <div v-if="voiceDrawerOpen" class="ptt-module voice-drawer-body">
         <div class="ptt-header">
           <span class="ptt-net-label">
             <Radio :size="13" /> VOICE COMMS
@@ -672,7 +679,7 @@ function onFileChange(ev) {
           <label class="gate-switch">
             <input type="checkbox" :checked="confirmGate" @change="emit('toggle-confirm-gate')" />
             <ShieldCheck :size="13" />
-            <span>{{ confirmGate ? 'CONFIRM EVERY REPORT BEFORE MAP' : 'AUTO-PLOT (CONFIRM DRAFTS ONLY)' }}</span>
+            <span>CONFIRM EVERY REPORT BEFORE MAP ({{ confirmGate ? 'GATE ON' : 'AUTO-PLOT' }})</span>
           </label>
           <button
             v-if="drafts.length > 0"
@@ -774,11 +781,11 @@ function onFileChange(ev) {
           <div v-if="drafts.length > 6" class="queue-more mono">+{{ drafts.length - 6 }} more awaiting confirmation</div>
         </section>
 
-        <!-- OPERATOR-READABLE EXTRACTED CONTEXT BREAKDOWN CARD -->
-        <section class="panel extraction-panel">
+        <!-- CONCISE EVENT NOTIFICATION CARD (Verbose Metadata Footer Removed) -->
+        <section class="panel extraction-panel is-concise">
           <div class="panel-heading">
             <div class="heading-left">
-              <span>EXTRACTED CONTEXT</span>
+              <span>LATEST REPORT</span>
               <span v-if="latestEvent" class="threat-pill" :class="`threat-${latestThreat}`">
                 {{ latestThreat.toUpperCase() }}
               </span>
@@ -809,7 +816,7 @@ function onFileChange(ev) {
           </div>
 
           <div v-if="latestEvent" class="extraction-content">
-            <!-- Top Classification Banner with APP-6 Symbol + Prominent Quantity Control -->
+            <!-- Concise Notification Row with APP-6 Symbol + Status + Quantity Stepper -->
             <div class="context-class-row">
               <i class="queue-sym" v-html="draftSymbol(latestEvent)"></i>
               <div class="context-class-copy">
@@ -830,14 +837,19 @@ function onFileChange(ev) {
                   </strong>
                 </div>
                 <div class="context-sub-meta mono">
-                  <span>{{ latestEvent.confirmed ? '✓ CONFIRMED' : confirmGate ? '⏳ HELD OFF MAP' : '⚠ UNCONFIRMED DRAFT' }}</span>
-                  <span v-if="latestConfidencePct != null">· CONF {{ latestConfidencePct }}%</span>
-                  <span v-if="latestEvent.latency_ms">· {{ latestEvent.latency_ms.total ?? latestEvent.latency_ms }}ms</span>
+                  <span>{{ latestEvent.confirmed ? (latestEvent.auto_confirmed ? '✓ AUTO-CONFIRMED' : '✓ CONFIRMED') : confirmGate ? '⏳ HELD OFF MAP' : '⚠ DRAFT' }}</span>
+                  <span v-if="latestEvent.contact?.speed_mps != null">· {{ Math.round(latestEvent.contact.speed_mps * 3.6) }} km/h {{ (latestEvent.contact?.heading || '').toUpperCase() }}</span>
+                  <span v-if="latestEvent.anchor">· {{ latestEvent.anchor }}</span>
+                  <span v-if="latestEvent.centre">· {{ latestEvent.mgrs || mgrsAt(latestEvent.centre, { radius: latestEvent.radius_m }) }}</span>
                 </div>
               </div>
 
-              <!-- Bold Quantity Badge with Inline Factual Correction (- / +) -->
-              <div class="qty-control-box mono" title="Quantity classification (use -/+ for factual correction)">
+              <!-- Compact Quantity Stepper (Contacts) -->
+              <div
+                v-if="latestEvent.type === 'contact'"
+                class="qty-control-box mono"
+                title="Quantity classification (use -/+ for factual correction)"
+              >
                 <span class="qty-box-label">QTY</span>
                 <div class="qty-stepper">
                   <button type="button" @click="stepEventQty(latestEvent, -1)"><Minus :size="11" /></button>
@@ -847,7 +859,7 @@ function onFileChange(ev) {
               </div>
             </div>
 
-            <!-- Inline Factual Correction Editor (for Contacts: Side, Type, Activity) -->
+            <!-- Inline Factual Correction Editor (Only when EDIT clicked) -->
             <div v-if="editOpen && latestEvent.type === 'contact'" class="inline-edit-panel mono">
               <label>
                 <span>SIDE</span>
@@ -871,7 +883,9 @@ function onFileChange(ev) {
                   <option value="infantry">INFANTRY</option>
                   <option value="apc">ARMOURED VEH</option>
                   <option value="vehicle">VEHICLE</option>
-                  <option value="drone">DRONE / FPV</option>
+                  <option value="drone">DRONE / UAV</option>
+                  <option value="helicopter">HELICOPTER</option>
+                  <option value="aircraft">AIRCRAFT</option>
                   <option value="sniper">SNIPER</option>
                   <option value="artillery">ARTILLERY</option>
                   <option value="ied">IED / MINE</option>
@@ -890,15 +904,43 @@ function onFileChange(ev) {
                   <option value="firing">FIRING</option>
                 </select>
               </label>
+              <label v-if="['drone', 'helicopter', 'aircraft'].includes(latestEvent.contact?.what)">
+                <span>DIRECTION</span>
+                <select
+                  :value="latestEvent.contact?.heading || ''"
+                  @change="updateContactField(latestEvent, { heading: $event.target.value })"
+                >
+                  <option value="">HOVER</option>
+                  <option value="north">NORTH (000°)</option>
+                  <option value="northeast">NE (045°)</option>
+                  <option value="east">EAST (090°)</option>
+                  <option value="southeast">SE (135°)</option>
+                  <option value="south">SOUTH (180°)</option>
+                  <option value="southwest">SW (225°)</option>
+                  <option value="west">WEST (270°)</option>
+                  <option value="northwest">NW (315°)</option>
+                </select>
+              </label>
+              <label v-if="['drone', 'helicopter', 'aircraft'].includes(latestEvent.contact?.what)">
+                <span>SPEED (KM/H)</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="1200"
+                  step="10"
+                  :value="latestEvent.contact?.speed_mps != null ? Math.round(latestEvent.contact.speed_mps * 3.6) : ''"
+                  placeholder="auto"
+                  @change="updateContactField(latestEvent, { speed_mps: Math.max(0, Number($event.target.value) || 0) / 3.6 })"
+                />
+              </label>
             </div>
 
-            <!-- Transcript + Optional English Translation Gloss for UK/RU/FR -->
-            <p class="transcript">“{{ latestEvent.text }}”</p>
+            <!-- Concise English Translation Gloss (Only for non-English UK/RU/FR reports) -->
             <div v-if="latestEvent.parsed?.summary_en" class="translation-gloss mono">
               EN GLOSS: {{ latestEvent.parsed.summary_en }}
             </div>
 
-            <!-- Threat Warnings -->
+            <!-- Threat Warnings (Only if Active Threat) -->
             <div
               v-for="w in latestEvent.threats || []"
               :key="w.callsign + (w.track || '')"
@@ -908,67 +950,7 @@ function onFileChange(ev) {
               {{ w.distance_m ? `${w.distance_m}m ${w.direction}` : 'AT POSITION' }}
             </div>
 
-            <!-- Operator-Friendly Structured Breakdown Table -->
-            <div class="breakdown-table mono">
-              <div class="bd-row">
-                <span class="bd-key">WHO / SENDER</span>
-                <strong class="bd-val">
-                  {{ (latestEvent.speaker || latestEvent.callsign || 'UNKNOWN').toUpperCase() }}
-                  <template v-if="latestEvent.sender"> · {{ latestEvent.sender }}</template>
-                  <template v-if="latestEvent.callsign_assumed"> (assumed)</template>
-                </strong>
-              </div>
-              <div class="bd-row">
-                <span class="bd-key">CLASSIFICATION</span>
-                <strong class="bd-val">
-                  <template v-if="latestEvent.type === 'contact'">
-                    {{ latestEvent.contact?.count || 1 }}× {{ (latestEvent.contact?.side || 'unknown').toUpperCase() }}
-                    {{ (latestEvent.contact?.detail || latestEvent.contact?.what || 'contact').toUpperCase() }}
-                    <template v-if="latestEvent.contact?.activity">
-                      · {{ latestEvent.contact.activity.toUpperCase() }}
-                      {{ latestEvent.contact?.heading ? latestEvent.contact.heading.toUpperCase() : '' }}
-                    </template>
-                  </template>
-                  <template v-else>
-                    FRIENDLY {{ (latestEvent.type || 'POSITION').toUpperCase() }}
-                    <template v-if="latestEvent.parsed?.quantity"> · {{ latestEvent.parsed.quantity }}× PAX/UNITS</template>
-                  </template>
-                </strong>
-              </div>
-              <div class="bd-row">
-                <span class="bd-key">ANCHOR / PLACE</span>
-                <strong class="bd-val">
-                  {{ latestEvent.anchor || latestEvent.parsed?.anchor?.name || 'NONE' }}
-                  <span v-if="(latestEvent.candidate_options || []).length > 1" class="amb-pill">
-                    {{ latestEvent.candidate_options.length }} MATCHES
-                  </span>
-                </strong>
-              </div>
-              <div class="bd-row">
-                <span class="bd-key">OFFSET / RADIUS</span>
-                <strong class="bd-val">
-                  {{ latestEvent.parsed?.distance_m ? `${Math.round(latestEvent.parsed.distance_m)}m ` : '' }}
-                  {{ (latestEvent.parsed?.relation || 'AT').replaceAll('_', ' ').toUpperCase() }}
-                  <template v-if="latestEvent.radius_m"> · ±{{ Math.round(latestEvent.radius_m) }}m</template>
-                </strong>
-              </div>
-              <div class="bd-row">
-                <span class="bd-key">MGRS / COORDS</span>
-                <strong class="bd-val accent-gold">
-                  <template v-if="latestEvent.centre">
-                    {{ latestEvent.mgrs || mgrsAt(latestEvent.centre, { radius: latestEvent.radius_m }) }}
-                    <small class="coord-sub">({{ latestEvent.centre[1].toFixed(5) }}, {{ latestEvent.centre[0].toFixed(5) }})</small>
-                  </template>
-                  <template v-else>UNRESOLVED</template>
-                </strong>
-              </div>
-              <div class="bd-row">
-                <span class="bd-key">ENGINE</span>
-                <strong class="bd-val">{{ latestEvent.extractor || 'rules' }}</strong>
-              </div>
-            </div>
-
-            <!-- Inline Candidate Picker inside Extracted Context too if selected event is ambiguous -->
+            <!-- Inline Candidate Picker (Only when Ambiguous, e.g. 'which tower?') -->
             <div v-if="(latestEvent.candidate_options || []).length > 1" class="candidate-picker">
               <div class="candidate-header mono">
                 <HelpCircle :size="12" />
@@ -992,25 +974,21 @@ function onFileChange(ev) {
               </div>
             </div>
 
-            <div v-if="latestEvent.note" class="geo-agent-note mono">{{ latestEvent.note }}</div>
-
-            <div v-if="latestEvent.ok && !latestEvent.superseded" class="extraction-footer">
+            <div v-if="latestEvent.ok && !latestEvent.superseded && !latestEvent.confirmed" class="extraction-footer">
               <button
-                v-if="!latestEvent.confirmed"
                 type="button"
                 class="confirm-inline-btn"
                 @click="emit('confirm-event', latestEvent)"
               >
                 <Check :size="13" /> {{ confirmGate ? 'CONFIRM & PLOT ON MAP' : 'CONFIRM FIX' }}
               </button>
-              <span v-else class="confirmed-pill mono">✓ CONFIRMED {{ formatZuluTime(latestEvent.confirmed_at) }}</span>
             </div>
 
             <pre v-if="showRawJson">{{ JSON.stringify(latestEvent, null, 2) }}</pre>
           </div>
 
           <div v-else class="empty-state">
-            Hold <strong>PUSH TO TALK</strong> / <strong>[SPACE]</strong>, use <strong>PHONE MIC</strong>, paste WhatsApp/Email in <strong>MSG</strong>, or tap a <strong>DEMO</strong> button above.
+            Expand <strong>VOICE COMMS</strong> above, hold <strong>[SPACE]</strong>, use <strong>PHONE MIC</strong>, or paste intel in <strong>MSG</strong>.
           </div>
         </section>
 

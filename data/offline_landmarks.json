@@ -1,0 +1,221 @@
+{
+  "_note": "Offline Paris & surrounding landmark fallback coordinates (WGS84 lon/lat + footprint radius) used when Nominatim/internet is unavailable. Supports EN, FR, UK, and RU spoken names.",
+  "landmarks": [
+    {
+      "name": "Tour Eiffel (Eiffel Tower)",
+      "category": "tower",
+      "lon": 2.294481,
+      "lat": 48.85837,
+      "radius_m": 65,
+      "aliases": ["eiffel tower", "tour eiffel", "the eiffel tower", "la tour eiffel", "ейфелева вежа", "ейфелевої вежі", "ейфелевій вежі", "эльфова вежа", "эйфелева башня", "эйфелевой башни"]
+    },
+    {
+      "name": "Cathédrale Notre-Dame de Paris",
+      "category": "church",
+      "lon": 2.349902,
+      "lat": 48.852968,
+      "radius_m": 65,
+      "aliases": ["notre dame", "notre-dame", "notre dame cathedral", "cathedrale notre dame", "нотр дам", "нотр-дам", "собор паризької богоматері"]
+    },
+    {
+      "name": "Panthéon",
+      "category": "monument",
+      "lon": 2.346414,
+      "lat": 48.846222,
+      "radius_m": 55,
+      "aliases": ["pantheon", "the pantheon", "le pantheon", "пантеон", "пантеону", "пантеона"]
+    },
+    {
+      "name": "Musée du Louvre",
+      "category": "museum",
+      "lon": 2.337644,
+      "lat": 48.860611,
+      "radius_m": 120,
+      "aliases": ["louvre", "the louvre", "musee du louvre", "louvre museum", "лувр", "лувру", "лувра"]
+    },
+    {
+      "name": "Arc de Triomphe",
+      "category": "monument",
+      "lon": 2.295028,
+      "lat": 48.873792,
+      "radius_m": 55,
+      "aliases": ["arc de triomphe", "the arc de triomphe", "triumphal arch", "тріумфальна арка", "триумфальная арка"]
+    },
+    {
+      "name": "Champ de Mars",
+      "category": "park",
+      "lon": 2.29863,
+      "lat": 48.855648,
+      "radius_m": 180,
+      "aliases": ["champ de mars", "mars field", "марсове поле", "марсово поле"]
+    },
+    {
+      "name": "Hôtel des Invalides",
+      "category": "monument",
+      "lon": 2.31255,
+      "lat": 48.85654,
+      "radius_m": 130,
+      "aliases": ["invalides", "les invalides", "hotel des invalides", "дім інвалідів", "дом инвалидов"]
+    },
+    {
+      "name": "Place de la Concorde",
+      "category": "square",
+      "lon": 2.321236,
+      "lat": 48.865633,
+      "radius_m": 95,
+      "aliases": ["concorde", "place de la concorde", "площа згоди", "площадь согласия"]
+    },
+    {
+      "name": "Champs-Élysées",
+      "category": "street",
+      "lon": 2.30756,
+      "lat": 48.86982,
+      "radius_m": 150,
+      "aliases": ["champs elysees", "champs-elysees", "єлисейські поля", "елисейские поля"]
+    },
+    {
+      "name": "Place du Trocadéro",
+      "category": "square",
+      "lon": 2.287592,
+      "lat": 48.862695,
+      "radius_m": 75,
+      "aliases": ["trocadero", "place du trocadero", "трокадеро"]
+    },
+    {
+      "name": "Tour Montparnasse",
+      "category": "tower",
+      "lon": 2.32195,
+      "lat": 48.84214,
+      "radius_m": 50,
+      "aliases": ["tour montparnasse", "montparnasse tower", "montparnasse", "монпарнас", "вежа монпарнас", "башня монпарнас"]
+    },
+    {
+      "name": "Tour Saint-Jacques",
+      "category": "tower",
+      "lon": 2.34886,
+      "lat": 48.85801,
+      "radius_m": 30,
+      "aliases": ["tour saint jacques", "saint jacques tower", "вежа сен жак"]
+    },
+    {
+      "name": "Basilique du Sacré-Cœur",
+      "category": "church",
+      "lon": 2.343104,
+      "lat": 48.886705,
+      "radius_m": 60,
+      "aliases": ["sacre coeur", "sacre-coeur", "montmartre", "сакре кер", "монмартр"]
+    },
+    {
+      "name": "Place de la Bastille",
+      "category": "square",
+      "lon": 2.369167,
+      "lat": 48.853194,
+      "radius_m": 75,
+      "aliases": ["bastille", "place de la bastille", "бастилія", "бастилия"]
+    },
+    {
+      "name": "Opéra Garnier",
+      "category": "theatre",
+      "lon": 2.331601,
+      "lat": 48.871969,
+      "radius_m": 65,
+      "aliases": ["opera garnier", "palais garnier", "opera", "опера гарньє", "опера"]
+    },
+    {
+      "name": "Gare du Nord",
+      "category": "station",
+      "lon": 2.355314,
+      "lat": 48.880948,
+      "radius_m": 90,
+      "aliases": ["gare du nord", "північний вокзал", "северный вокзал"]
+    },
+    {
+      "name": "Gare de Lyon",
+      "category": "station",
+      "lon": 2.373479,
+      "lat": 48.844304,
+      "radius_m": 90,
+      "aliases": ["gare de lyon", "ліонський вокзал", "лионский вокзал"]
+    },
+    {
+      "name": "Gare Montparnasse",
+      "category": "station",
+      "lon": 2.32046,
+      "lat": 48.84094,
+      "radius_m": 95,
+      "aliases": ["gare montparnasse", "вокзал монпарнас"]
+    },
+    {
+      "name": "Hôtel de Ville de Paris",
+      "category": "hall",
+      "lon": 2.352222,
+      "lat": 48.856578,
+      "radius_m": 70,
+      "aliases": ["hotel de ville", "paris city hall", "отель де віль"]
+    },
+    {
+      "name": "Jardin des Tuileries",
+      "category": "park",
+      "lon": 2.3275,
+      "lat": 48.8635,
+      "radius_m": 150,
+      "aliases": ["tuileries", "jardin des tuileries", "tuileries garden", "сад тюїльрі", "тюильри"]
+    },
+    {
+      "name": "Pont Neuf",
+      "category": "bridge",
+      "lon": 2.34139,
+      "lat": 48.85706,
+      "radius_m": 45,
+      "aliases": ["pont neuf", "новий міст", "новый мост"]
+    },
+    {
+      "name": "Pont Alexandre III",
+      "category": "bridge",
+      "lon": 2.31356,
+      "lat": 48.8639,
+      "radius_m": 45,
+      "aliases": ["pont alexandre iii", "pont alexandre 3", "міст олександра 3"]
+    },
+    {
+      "name": "La Sorbonne",
+      "category": "university",
+      "lon": 2.34348,
+      "lat": 48.84864,
+      "radius_m": 65,
+      "aliases": ["sorbonne", "la sorbonne", "сорбонна", "сорбонни"]
+    },
+    {
+      "name": "Musée d'Orsay",
+      "category": "museum",
+      "lon": 2.326561,
+      "lat": 48.859961,
+      "radius_m": 75,
+      "aliases": ["musee d orsay", "orsay", "orsay museum", "музей орсе", "орсе"]
+    },
+    {
+      "name": "Place Vendôme",
+      "category": "square",
+      "lon": 2.32944,
+      "lat": 48.8675,
+      "radius_m": 55,
+      "aliases": ["place vendome", "vendome", "вандомська площа"]
+    },
+    {
+      "name": "Jardin des Plantes",
+      "category": "park",
+      "lon": 2.3598,
+      "lat": 48.8439,
+      "radius_m": 130,
+      "aliases": ["jardin des plantes", "ботанічний сад"]
+    },
+    {
+      "name": "La Défense",
+      "category": "district",
+      "lon": 2.2385,
+      "lat": 48.8919,
+      "radius_m": 200,
+      "aliases": ["la defense", "defense", "ла дефанс", "дефанс"]
+    }
+  ]
+}

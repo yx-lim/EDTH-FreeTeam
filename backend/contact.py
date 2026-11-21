@@ -45,6 +45,58 @@ _HEADING = (r"\b(?:towards? (?:the )?|to the |vers le |vers l |au |a l )?(?P<h>n
             r"|nord est|nord ouest|sud est|sud ouest|nord|sud|est|ouest)(?:wards?)?\b")
 _FR_DIRS = {"nord": "north", "sud": "south", "est": "east", "ouest": "west", "nord est": "northeast",
             "nord ouest": "northwest", "sud est": "southeast", "sud ouest": "southwest"}
+_HEADING_DEG = {"north": 0.0, "northeast": 45.0, "east": 90.0, "southeast": 135.0,
+                "south": 180.0, "southwest": 225.0, "west": 270.0, "northwest": 315.0}
+_NUMERIC_HEADING_RE = re.compile(r"\b(?:heading|course|bearing|cap|курс)\s+(?:of\s+)?(?P<deg>\d{1,3})\b(?:\s*(?:deg|degrees|°))?", re.IGNORECASE)
+_SPEED_KMH_RE = re.compile(r"(?P<v>\d+(?:[.,]\d+)?)\s*(?:km\s*(?:/|per)\s*h(?:our)?|km\s*/?\s*h|kph|kmph|kilomet(?:er|re)s?\s*(?:per|/)\s*hour|км\s*/?\s*год|км\s*/?\s*ч|км\s*(?:на|в|за)\s*годин\w*|кілометр\w*\s*(?:на|в|за)\s*годин\w*)", re.IGNORECASE)
+_SPEED_MPS_RE = re.compile(r"(?P<v>\d+(?:[.,]\d+)?)\s*(?:m\s*(?:/|per)\s*s(?:ec(?:ond)?)?|met(?:er|re)s?\s*(?:per|/)\s*sec(?:ond)?|м\s*/\s*с)", re.IGNORECASE)
+_SPEED_KTS_RE = re.compile(r"(?P<v>\d+(?:[.,]\d+)?)\s*(?:knots?|kts?|вузл\w*|узл\w*)", re.IGNORECASE)
+_SPEED_MPH_RE = re.compile(r"(?P<v>\d+(?:[.,]\d+)?)\s*(?:mph|miles?\s*(?:per|/)\s*hour)", re.IGNORECASE)
+_SPEED_QUAL_FAST = re.compile(r"\b(?:very\s+fast|fast|high\s+speed|rapid(?:ly)?|diving|full\s+speed|speeding|швидк\w*|быстр\w*|стремительн\w*)\b", re.IGNORECASE)
+_SPEED_QUAL_SLOW = re.compile(r"\b(?:very\s+slow|slow(?:ly)?|loitering|cruising\s+slow|creeping|повільн\w*|медленн\w*)\b", re.IGNORECASE)
+_SPEED_QUAL_HOVER = re.compile(r"\b(?:hovering|stationary|static|not\s+moving|waiting\s+on\s+the\s+ground|ждун\w*|висит\w*|висить|завис\w*)\b", re.IGNORECASE)
+_SPEED_STRIP_RE = re.compile(
+    r"(?:\b(?:at|around|about|speed|at\s+speed|зі\s+швидкістю|со\s+скоростью|швидкість|скорость)\s+)?"
+    r"\d+(?:[.,]\d+)?\s*(?:km\s*(?:/|per)\s*h(?:our)?|km\s*/?\s*h|kph|kmph|kilomet(?:er|re)s?\s*(?:per|/)\s*hour|m\s*(?:/|per)\s*s(?:ec(?:ond)?)?|knots?|kts?|mph|км\s*/?\s*год|км\s*/?\s*ч|км\s*(?:на|в|за)\s*годин\w*|кілометр\w*\s*(?:на|в|за)\s*годин\w*|м\s*/\s*с|вузл\w*|узл\w*)",
+    re.IGNORECASE,
+)
+
+
+def parse_speed_mps(text: str, what: str = "drone", activity: str | None = None, detail: str | None = None) -> float | None:
+    """Extract explicit or qualitative speed (metres/second) from soldier input (EN/FR/UK/RU)."""
+    if not text:
+        return None
+    for rx, factor in (
+        (_SPEED_KMH_RE, 1.0 / 3.6),
+        (_SPEED_MPS_RE, 1.0),
+        (_SPEED_KTS_RE, 0.514444),
+        (_SPEED_MPH_RE, 0.44704),
+    ):
+        m = rx.search(text)
+        if m:
+            try:
+                val = float(m.group("v").replace(",", ".")) * factor
+                return round(max(0.0, min(900.0, val)), 2)
+            except ValueError:
+                pass
+    if activity == "static" or _SPEED_QUAL_HOVER.search(text):
+        return 0.0
+    if _SPEED_QUAL_FAST.search(text):
+        return {"drone": 42.0, "helicopter": 75.0, "aircraft": 200.0, "vehicle": 28.0, "tank": 15.0}.get(what, 25.0)
+    if _SPEED_QUAL_SLOW.search(text):
+        return {"drone": 8.0, "helicopter": 25.0, "aircraft": 70.0, "vehicle": 6.0, "tank": 4.0}.get(what, 6.0)
+    return None
+
+
+def parse_heading_deg(text: str) -> float | None:
+    m = _NUMERIC_HEADING_RE.search(text or "")
+    if m:
+        deg = float(m.group("deg"))
+        if 0 <= deg <= 360:
+            return deg % 360.0
+    return None
+
+
 # "300 metres east of me": the reporter is the reference point.
 SELF = r"(?:me|us|my position|our position|my location|moi|nous|ma position|notre position)"
 
@@ -74,11 +126,25 @@ def describe(clauses: list[str], number) -> dict:
     activity = "firing" if re.search(_FIRING, text) else "static" if re.search(_STATIC, text) else \
         "moving" if re.search(_MOVING, text) else None
     heading = None
-    if activity == "moving" or re.search(_MOVING, text):
+    heading_deg = parse_heading_deg(text)
+    if heading_deg is not None:
+        heading = compass(heading_deg)
+        if activity is None:
+            activity = "moving"
+    if heading is None and (activity == "moving" or re.search(_MOVING, text)):
         hm = re.search(_MOVING + r"\s+" + _HEADING, text)
         if hm:
             heading = _FR_DIRS.get(hm.group("h"), hm.group("h"))
-    return {"what": what, "side": side, "count": int(count) if count else None, "activity": activity, "heading": heading}
+            heading_deg = _HEADING_DEG.get(heading)
+    speed_mps = parse_speed_mps(text, what=what, activity=activity)
+    if speed_mps and speed_mps > 0 and activity is None:
+        activity = "moving"
+    out = {"what": what, "side": side, "count": int(count) if count else None, "activity": activity, "heading": heading}
+    if heading_deg is not None:
+        out["heading_deg"] = round(heading_deg, 1)
+    if speed_mps is not None:
+        out["speed_mps"] = speed_mps
+    return out
 
 
 def location_clauses(clauses: list[str]) -> list[str]:
@@ -86,6 +152,8 @@ def location_clauses(clauses: list[str]) -> list[str]:
     read as "north of" and "towards the bridge" is not read as the contact's position."""
     out = []
     for c in clauses:
+        c = _SPEED_STRIP_RE.sub(" ", c)
+        c = _NUMERIC_HEADING_RE.sub(" ", c)
         c = re.sub(_MOVING + r"\s+" + _HEADING, " ", c)
         c = re.sub(_MOVING + r"\s+(?:towards?|to|vers)\s+.*", " ", c)   # a destination, not where it is now
         c = re.sub(r"\b(?:contact|spotted|sighted|observed|i see|we see|i can see|we can see|repere|on voit|je vois)\b", " ", c)
@@ -126,6 +194,30 @@ def validate(c: dict | None) -> dict:
         out["ttl_s"] = None
     out["word"] = str(c["word"])[:40] if c.get("word") else None
     out["another"] = bool(c.get("another"))
+    if c.get("heading_deg") is not None:
+        try:
+            hd = float(c["heading_deg"]) % 360.0
+            out["heading_deg"] = round(hd, 1)
+            if not out["heading"]:
+                out["heading"] = compass(hd)
+        except (TypeError, ValueError):
+            pass
+    elif out["heading"] in _HEADING_DEG:
+        out["heading_deg"] = _HEADING_DEG[out["heading"]]
+    if c.get("speed_mps") is not None:
+        try:
+            sp = float(c["speed_mps"])
+            if 0.0 <= sp <= 900.0:
+                out["speed_mps"] = round(sp, 2)
+        except (TypeError, ValueError):
+            pass
+    elif c.get("speed_kmh") is not None:
+        try:
+            sp = float(c["speed_kmh"]) / 3.6
+            if 0.0 <= sp <= 900.0:
+                out["speed_mps"] = round(sp, 2)
+        except (TypeError, ValueError):
+            pass
     return out
 
 
@@ -168,12 +260,14 @@ def compatible(a: dict, b: dict) -> bool:
 def combine(old: dict, new: dict) -> dict:
     """The track's description after a second sighting: the more specific type and side, the larger count, the
     latest activity and heading."""
-    return {**old, **new,   # extra fields a parser adds (detail, ttl_s) carry over
+    return {**old, **new,   # extra fields a parser adds (detail, ttl_s, speed_mps, heading_deg) carry over
             "what": new["what"] if new["what"] != "unknown" else old["what"],
             "side": new["side"] if new["side"] != "unknown" else old["side"],
             "count": max(filter(None, (old.get("count"), new.get("count"))), default=None),
             "activity": new.get("activity") or old.get("activity"),
-            "heading": new.get("heading") if new.get("activity") else (new.get("heading") or old.get("heading"))}
+            "heading": new.get("heading") if new.get("activity") else (new.get("heading") or old.get("heading")),
+            "heading_deg": new.get("heading_deg") if new.get("heading_deg") is not None else old.get("heading_deg"),
+            "speed_mps": new.get("speed_mps") if new.get("speed_mps") is not None else old.get("speed_mps")}
 
 
 _POINTS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]

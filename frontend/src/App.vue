@@ -130,15 +130,30 @@ const RASTER_BASEMAPS = {
     grid: '#1f2937',
     halo: '#ffffff',
   },
+  offline: {
+    label: 'OFFLINE',
+    tiles: ['/api/tiles/{z}/{x}/{y}.jpg'],
+    attribution: 'Local Paris Offline Map Cache (Zero Internet)',
+    minzoom: 12,
+    maxzoom: 16,
+    grid: '#cbd5e1',
+    halo: '#090e14',
+    paint: {
+      'raster-brightness-min': 0.92,
+      'raster-brightness-max': 0.06,
+      'raster-saturation': -0.85,
+      'raster-hue-rotate': 180,
+      'raster-contrast': 0.14,
+    },
+  },
 }
 
 const ALL_BASEMAPS = {
   ...RASTER_BASEMAPS,
-  offline: { label: 'OFFLINE', grid: '#94a3b8', halo: '#090e14' },
 }
 
 const SPEECH_LANG = { en: 'en-GB', fr: 'fr-FR', uk: 'uk-UA', ru: 'ru-RU', auto: 'en-GB' }
-const STT_LABELS = { elevenlabs: 'ElevenLabs', gemini: 'Gemini', mistral: 'Mistral', whisper: 'Whisper' }
+const STT_LABELS = { elevenlabs: 'ElevenLabs', gemini: 'Gemini', mistral: 'Mistral', whisper: 'MLX Whisper' }
 const KIND = {
   report: 'report',
   request: 'request',
@@ -230,7 +245,7 @@ const netSpeaking = ref(false)
 const netSegments = ref(0)
 const netMsg = ref('')
 
-let map, netRecogniser, ticker, socket, unmounted = false
+let map, netRecogniser, ticker, flightTimer, socket, unmounted = false
 let netCtx, netStream, netNode, netAudio, netVad, netQueue = Promise.resolve()
 let waveCtx = null
 let waveRaf = null
@@ -275,9 +290,21 @@ const allLiveContacts = computed(() => {
     }))
 })
 
-const contactsOnMap = computed(() =>
-  allLiveContacts.value.filter((e) => !confirmGate.value || e.trackConfirmed || e.confirmed),
-)
+const contactsOnMap = computed(() => {
+  if (!confirmGate.value) return allLiveContacts.value
+  const latestConfirmed = new Map()
+  visible.value.forEach((e) => {
+    if (!isContact(e) || !e.ok || e.superseded || !e.confirmed) return
+    latestConfirmed.set(e.callsign, e)
+  })
+  return [...latestConfirmed.values()]
+    .filter((e) => !live.value || now.value - e.t <= contactTtl(e.contact) || persistent(e.contact))
+    .map((e) => ({
+      ...e,
+      trackConfirmed: true,
+      expired: live.value && now.value - e.t > contactTtl(e.contact),
+    }))
+})
 
 const contactDoubt = (e) =>
   !(e.trackConfirmed || e.confirmed || e.corroborated) ||
@@ -380,20 +407,16 @@ const cursorBearing = computed(() =>
 )
 
 // Duty-Officer Confirmation Queue:
-// - When confirmGate is ON: holds EVERY unconfirmed plotted report (units + contacts) before going on the map!
-// - When confirmGate is OFF: holds uncorroborated sightings + ambiguous/assumed unit fixes!
+// - When confirmGate is ON (GATE: ON): holds EVERY unconfirmed plotted report before going on the map!
+// - When confirmGate is OFF (AUTO-PLOT): reports auto-agree & confirm immediately — zero manual queue nagging!
 const drafts = computed(() => {
-  if (!live.value) return []
+  if (!live.value || !confirmGate.value) return []
   const latestUnits = new Map()
   visible.value.forEach((e) => {
     if (e.ok && !e.superseded && !isContact(e)) latestUnits.set(e.callsign, e)
   })
-  const units = [...latestUnits.values()].filter((e) =>
-    confirmGate.value ? !e.confirmed : (e.ambiguous || e.callsign_assumed) && !e.confirmed,
-  )
-  const seen = allLiveContacts.value.filter((e) =>
-    confirmGate.value ? !(e.trackConfirmed || e.confirmed) : !(e.trackConfirmed || e.confirmed || e.corroborated),
-  )
+  const units = [...latestUnits.values()].filter((e) => !e.confirmed)
+  const seen = allLiveContacts.value.filter((e) => !(e.trackConfirmed || e.confirmed))
   const rank = (e) => ((e.candidate_options || []).length > 1 ? 0 : isContact(e) ? (e.contact?.side === 'hostile' ? 1 : 2) : 3)
   return [...seen, ...units].sort((a, b) => rank(a) - rank(b) || b.t - a.t)
 })
@@ -426,6 +449,21 @@ async function chooseStt(name) {
   sttOptions.value = out.available
 }
 
+async function setConfirmGate(enabled) {
+  confirmGate.value = !!enabled
+  const autoConfirm = !confirmGate.value
+  try {
+    const r = await fetch('/api/mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auto_confirm: autoConfirm }),
+    })
+    if (r.ok) {
+      playRadioTone('ack')
+    }
+  } catch {}
+}
+
 async function toggleOfflineMode() {
   const next = !offlineMode.value
   const r = await fetch('/api/mode', {
@@ -438,7 +476,7 @@ async function toggleOfflineMode() {
     offlineMode.value = !!out.offline
     if (offlineMode.value) {
       basemap.value = 'offline'
-      heard.value = 'OFFLINE OPS ENABLED · 100% local rules + local OSM vector streets (zero internet needed)'
+      heard.value = 'OFFLINE OPS ENABLED · MLX Whisper (EN/FR/UK) + Ollama qwen2.5:3b + Local Paris Map (zero internet)'
     } else {
       if (basemap.value === 'offline') basemap.value = 'dark'
       heard.value = 'HYBRID AI MODE · Gemini + ElevenLabs + OSM Grounding active'
@@ -663,20 +701,162 @@ function removeOverlay(id) {
   tacOverlays.value = tacOverlays.value.filter((o) => o.id !== id)
 }
 
+// --- Airborne UAV / Flying Object Live Vector & Directional Arrow Physics -------------------------------------
+const AIRBORNE_WHATS = new Set(['drone', 'helicopter', 'aircraft'])
+const isAirborneContact = (c) => AIRBORNE_WHATS.has(c?.what)
+
+function airborneHeadingDeg(c) {
+  if (!c) return null
+  if (typeof c.heading_deg === 'number' && Number.isFinite(c.heading_deg)) return ((c.heading_deg % 360) + 360) % 360
+  if (c.heading && c.heading in HEADING_DEG) return HEADING_DEG[c.heading]
+  return null
+}
+
+function airborneSpeedMps(c) {
+  if (!c) return 0
+  if (c.activity === 'static' || /waiting|hover|ждун/i.test(c.detail || '')) return 0
+  if (typeof c.speed_mps === 'number' && Number.isFinite(c.speed_mps) && c.speed_mps >= 0) return c.speed_mps
+  const hasDir = airborneHeadingDeg(c) != null
+  if (!hasDir && c.activity !== 'moving') return 0
+  const det = (c.detail || '').toLowerCase()
+  if (det.includes('shahed') || det.includes('geran') || det.includes('мопед')) return 50
+  if (det.includes('orlan') || det.includes('lancet')) return 30
+  if (c.what === 'aircraft') return 140
+  if (c.what === 'helicopter') return 55
+  return 18 // default tactical UAV / FPV cruise (~65 km/h)
+}
+
+function offsetLonLat([lon0, lat0], bearingDeg, distM) {
+  if (!distM || bearingDeg == null) return [lon0, lat0]
+  const rad = (bearingDeg * Math.PI) / 180
+  const dNorth = distM * Math.cos(rad)
+  const dEast = distM * Math.sin(rad)
+  const lat = lat0 + dNorth / 110540
+  const lon = lon0 + dEast / (111320 * Math.max(0.15, Math.cos((lat0 * Math.PI) / 180)))
+  return [lon, lat]
+}
+
+function airborneLiveState(e, nowSec) {
+  const c = e.contact || {}
+  const headingDeg = airborneHeadingDeg(c)
+  const speedMps = airborneSpeedMps(c)
+  const moving = headingDeg != null && speedMps > 0
+  const ttlCap = contactTtl(c)
+  const elapsed = live.value ? Math.max(0, Math.min(nowSec - e.t, ttlCap)) : 0
+  const travelledM = moving ? speedMps * elapsed : 0
+  const pos = moving ? offsetLonLat(e.centre, headingDeg, travelledM) : e.centre
+  const leadEnd = moving ? offsetLonLat(pos, headingDeg, Math.max(70, Math.min(450, speedMps * 12))) : null
+  const speedKmh = Math.round(speedMps * 3.6)
+  return { headingDeg, speedMps, speedKmh, moving, elapsed, travelledM, pos, leadEnd }
+}
+
+function renderAirborne(nowSec = Date.now() / 1000) {
+  if (!map?.getSource('airborne')) return
+  const seen = showContacts.value ? contactsOnMap.value : []
+  const airSeen = seen.filter((e) => isAirborneContact(e.contact))
+  const trackFeatures = []
+  const vectorFeatures = []
+  const arrowFeatures = []
+
+  for (const e of airSeen) {
+    const st = airborneLiveState(e, nowSec)
+    const colourHex = sideOf(e.contact).colour
+    const desc = describeContact(e.contact)
+    const dirLabel = st.headingDeg != null ? headingToCardinal(st.headingDeg) : ''
+    const speedTag = st.moving ? `${st.speedKmh} km/h ${dirLabel}` : 'HOVER · 0 km/h'
+    const compactLabel = `${desc} • ${speedTag}`
+
+    if (st.moving && st.travelledM > 2) {
+      trackFeatures.push({
+        type: 'Feature',
+        geometry: { type: 'LineString', coordinates: [e.centre, st.pos] },
+        properties: { colour: colourHex },
+      })
+    }
+    if (st.moving && st.leadEnd) {
+      vectorFeatures.push({
+        type: 'Feature',
+        geometry: { type: 'LineString', coordinates: [st.pos, st.leadEnd] },
+        properties: { colour: colourHex },
+      })
+    }
+
+    arrowFeatures.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: st.pos },
+      properties: {
+        icon: st.moving ? 'flight-arrow' : 'hover-arrow',
+        colour: colourHex,
+        heading: st.headingDeg ?? 0,
+        label: compactLabel,
+        title: desc.toUpperCase(),
+        lat: Number(st.pos[1]).toFixed(5),
+        lon: Number(st.pos[0]).toFixed(4),
+        margin: Math.round(e.radius_m || 0),
+        mgrs: mgrsAt(st.pos, { radius: e.radius_m }),
+        detail: e.seen_by?.length ? `seen by ${e.seen_by.join(', ')}` : 'airborne track',
+        flight: st.moving
+          ? `${String(Math.round(st.headingDeg)).padStart(3, '0')}° ${dirLabel} · ${st.speedKmh} km/h (${st.speedMps.toFixed(1)} m/s) · +${Math.round(st.travelledM)}m`
+          : 'HOVER / STATIC · 0 km/h',
+        threat: '',
+      },
+    })
+  }
+
+  map.getSource('airborne-tracks').setData({ type: 'FeatureCollection', features: trackFeatures })
+  map.getSource('airborne-vectors').setData({ type: 'FeatureCollection', features: vectorFeatures })
+  map.getSource('airborne').setData({ type: 'FeatureCollection', features: arrowFeatures })
+}
+
 // --- MapLibre Rendering ----------------------------------------------------------------------------------------
+function formatCallsignTitle(cs) {
+  if (!cs) return 'Unit'
+  return cs
+    .split(/\s+/)
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : ''))
+    .join(' ')
+}
+
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+}
+
 function render() {
   if (!map?.getSource('regions')) return
   const ok = visible.value.filter((e) => e.ok && !e.superseded && !isContact(e) && isPlottableOnMap(e))
   const latest = new Map()
   ok.forEach((e) => latest.set(e.callsign, e))
   const current = [...latest.values()]
+  const threatened = current.map((e) => [e, showContacts.value ? threatsTo(e) : []]).filter(([, t]) => t.length)
+
+  const unitFeatureProps = (e) => {
+    const t = threatened.find(([u]) => u === e)?.[1] || []
+    const title = formatCallsignTitle(e.callsign)
+    const mgrs = e.mgrs || mgrsAt(e.centre, { radius: e.radius_m })
+    return {
+      icon: `ms:${suspected(e) ? SIDC.dashed : SIDC.solid}`,
+      label: live.value ? `${title} • ${ago(e.t)}` : title,
+      colour: t.length ? SIDE.hostile.colour : colour(e.callsign),
+      title,
+      lat: Number(e.centre[1]).toFixed(5),
+      lon: Number(e.centre[0]).toFixed(4),
+      margin: Math.round(e.radius_m || 0),
+      mgrs,
+      detail: e.anchor || '',
+      threat: t.length ? `⚠ ${t[0].what} ${t[0].d ? `${t[0].d}m ${t[0].dir}` : 'at position'}` : '',
+    }
+  }
 
   map.getSource('units').setData({
     type: 'FeatureCollection',
     features: current.map((e) => ({
       type: 'Feature',
       geometry: { type: 'Point', coordinates: e.centre },
-      properties: { icon: `ms:${suspected(e) ? SIDC.dashed : SIDC.solid}` },
+      properties: unitFeatureProps(e),
     })),
   })
   map.getSource('regions').setData({
@@ -711,22 +891,13 @@ function render() {
       : [],
   })
 
-  const threatened = current.map((e) => [e, showContacts.value ? threatsTo(e) : []]).filter(([, t]) => t.length)
   map.getSource('labels').setData({
     type: 'FeatureCollection',
-    features: current.map((e) => {
-      const t = threatened.find(([u]) => u === e)?.[1] || []
-      return {
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: e.centre },
-        properties: {
-          label:
-            `${e.callsign} ±${Math.round(e.radius_m)} m${live.value ? ' · ' + ago(e.t) : ''}\n${e.mgrs || mgrsAt(e.centre, { radius: e.radius_m })}` +
-            (t.length ? `\n⚠ ${t[0].what} ${t[0].d ? `${t[0].d} m ${t[0].dir}` : 'at position'}` : ''),
-          colour: t.length ? SIDE.hostile.colour : colour(e.callsign),
-        },
-      }
-    }),
+    features: current.map((e) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: e.centre },
+      properties: unitFeatureProps(e),
+    })),
   })
   map.getSource('threat').setData({
     type: 'FeatureCollection',
@@ -741,14 +912,15 @@ function render() {
     features: tasks.value.map((e) => ({
       type: 'Feature',
       geometry: e.target.region,
-      properties: { colour: colour(e.callsign), label: `${e.callsign} ▸ ${e.target.anchor}` },
+      properties: { colour: colour(e.callsign), label: `${formatCallsignTitle(e.callsign)} ▸ ${e.target.anchor}` },
     })),
   })
 
   const seen = showContacts.value ? contactsOnMap.value : []
+  const groundSeen = seen.filter((e) => !isAirborneContact(e.contact))
   map.getSource('contact-regions').setData({
     type: 'FeatureCollection',
-    features: seen.map((e) => ({
+    features: groundSeen.map((e) => ({
       type: 'Feature',
       geometry: e.region,
       properties: { colour: sideOf(e.contact).colour },
@@ -756,17 +928,30 @@ function render() {
   })
   map.getSource('contacts').setData({
     type: 'FeatureCollection',
-    features: seen.map((e) => ({
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: e.centre },
-      properties: {
-        icon: `ms:${sidc(e.contact, contactDoubt(e))}`,
-        colour: sideOf(e.contact).colour,
-        heading: HEADING_DEG[e.contact?.heading] ?? null,
-        label: `${describeContact(e.contact)}\n${e.expired ? `unconfirmed, ${age(e.t)} old · ` : live.value ? ago(e.t) + ' · ' : ''}${e.seen_by?.length ? 'seen by ' + e.seen_by.join(', ') : 'reporter unknown'}`,
-      },
-    })),
+    features: groundSeen.map((e) => {
+      const desc = describeContact(e.contact)
+      const timeTag = e.expired ? `${age(e.t)} old` : live.value ? ago(e.t) : ''
+      return {
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: e.centre },
+        properties: {
+          icon: `ms:${sidc(e.contact, contactDoubt(e))}`,
+          colour: sideOf(e.contact).colour,
+          heading: HEADING_DEG[e.contact?.heading] ?? null,
+          label: timeTag ? `${desc} • ${timeTag}` : desc,
+          title: desc.toUpperCase(),
+          lat: Number(e.centre[1]).toFixed(5),
+          lon: Number(e.centre[0]).toFixed(4),
+          margin: Math.round(e.radius_m || 0),
+          mgrs: e.mgrs || mgrsAt(e.centre, { radius: e.radius_m }),
+          detail: e.seen_by?.length ? `seen by ${e.seen_by.join(', ')}` : 'reporter unknown',
+          flight: '',
+          threat: '',
+        },
+      }
+    }),
   })
+  renderAirborne(Date.now() / 1000)
   map.getSource('custom').setData({
     type: 'FeatureCollection',
     features: customPlaces.value.map((p) => ({
@@ -863,20 +1048,62 @@ async function ensureOfflineBasemapLoaded() {
 function applyBasemap() {
   if (!map?.getLayer('grid-line')) return
   const b = ALL_BASEMAPS[basemap.value] || ALL_BASEMAPS.dark
-  const isOffline = basemap.value === 'offline'
   for (const id of Object.keys(RASTER_BASEMAPS)) {
-    map.setLayoutProperty(`base-${id}`, 'visibility', !isOffline && id === basemap.value ? 'visible' : 'none')
+    map.setLayoutProperty(`base-${id}`, 'visibility', id === basemap.value ? 'visible' : 'none')
   }
+  // Keep vector street overlay off when crisp pre-cached Paris offline raster tiles are active
   for (const lyr of ['offline-parks', 'offline-buildings', 'offline-streets', 'offline-streets-major', 'offline-labels']) {
-    if (map.getLayer(lyr)) map.setLayoutProperty(lyr, 'visibility', isOffline ? 'visible' : 'none')
+    if (map.getLayer(lyr)) map.setLayoutProperty(lyr, 'visibility', 'none')
   }
-  if (isOffline) ensureOfflineBasemapLoaded()
   map.setPaintProperty('grid-line', 'line-color', b.grid)
   map.setPaintProperty('grid-label', 'text-color', b.grid)
   map.setPaintProperty('grid-label', 'text-halo-color', b.halo)
 }
 watch(basemap, applyBasemap)
 watch(showGrid, updateGrid)
+
+function flightArrowImage() {
+  // Bold swept directional flight chevron arrow pointing 0° North (SDF tinted by side colour)
+  const size = 96
+  const c = document.createElement('canvas')
+  c.width = c.height = size
+  const g = c.getContext('2d')
+  g.fillStyle = '#ffffff'
+  g.strokeStyle = '#ffffff'
+  g.lineJoin = 'round'
+  g.beginPath()
+  g.moveTo(size / 2, 6)               // sharp nose tip
+  g.lineTo(size - 14, size - 16)     // right swept wingtip
+  g.lineTo(size / 2, size - 32)      // inner tail notch
+  g.lineTo(14, size - 16)            // left swept wingtip
+  g.closePath()
+  g.fill()
+  g.lineWidth = 4
+  g.stroke()
+  return { width: size, height: size, data: new Uint8Array(g.getImageData(0, 0, size, size).data.buffer) }
+}
+
+function hoverArrowImage() {
+  // Hovering / stationary UAV radar ring + inner directional chevron (SDF tinted by side colour)
+  const size = 96
+  const c = document.createElement('canvas')
+  c.width = c.height = size
+  const g = c.getContext('2d')
+  g.strokeStyle = '#ffffff'
+  g.fillStyle = '#ffffff'
+  g.lineWidth = 5
+  g.beginPath()
+  g.arc(size / 2, size / 2, 34, 0, Math.PI * 2)
+  g.stroke()
+  g.beginPath()
+  g.moveTo(size / 2, 22)
+  g.lineTo(size / 2 + 18, 62)
+  g.lineTo(size / 2, 52)
+  g.lineTo(size / 2 - 18, 62)
+  g.closePath()
+  g.fill()
+  return { width: size, height: size, data: new Uint8Array(g.getImageData(0, 0, size, size).data.buffer) }
+}
 
 function arrowImage() {
   const size = 96
@@ -1372,6 +1599,8 @@ function connect() {
     }
     if (msg.type === 'mode') {
       offlineMode.value = !!msg.offline
+      if (typeof msg.auto_confirm === 'boolean') confirmGate.value = !msg.auto_confirm
+      if (msg.stt !== undefined) serverStt.value = msg.stt
     }
     if (msg.type === 'handsets') {
       handsets.value = { count: msg.count || 0, transmitting: !!msg.transmitting, active_callsign: msg.active_callsign || null }
@@ -1416,11 +1645,18 @@ onMounted(async () => {
     zoom: 15.2,
     style: {
       version: 8,
-      glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+      glyphs: `${location.origin}/glyphs/{fontstack}/{range}.pbf`,
       sources: Object.fromEntries(
         Object.entries(RASTER_BASEMAPS).map(([id, b]) => [
           `base-${id}`,
-          { type: 'raster', tiles: b.tiles, tileSize: 256, maxzoom: b.maxzoom, attribution: b.attribution },
+          {
+            type: 'raster',
+            tiles: b.tiles,
+            tileSize: 256,
+            minzoom: b.minzoom ?? 0,
+            maxzoom: b.maxzoom,
+            attribution: b.attribution,
+          },
         ]),
       ),
       layers: [
@@ -1454,6 +1690,9 @@ onMounted(async () => {
       'grid-labels',
       'contact-regions',
       'contacts',
+      'airborne',
+      'airborne-tracks',
+      'airborne-vectors',
       'threat',
       'range-rings',
       'fov-cone',
@@ -1575,18 +1814,18 @@ onMounted(async () => {
       paint: { 'text-color': '#e5b84b', 'text-halo-color': '#0b0d10', 'text-halo-width': 2 },
     })
 
-    // Friendly unit NATO APP-6 symbols & labels
+    // Friendly unit NATO APP-6 symbols & compact 1-line labels
     map.addLayer({ id: 'unit-icon', type: 'symbol', source: 'units', layout: { 'icon-image': ['get', 'icon'], 'icon-allow-overlap': true, 'icon-ignore-placement': true } })
     map.addLayer({
       id: 'label',
       type: 'symbol',
       source: 'labels',
-      layout: { 'text-field': ['get', 'label'], 'text-size': 11.5, 'text-offset': [0, -2.7], 'text-max-width': 30, 'text-font': ['Open Sans Semibold'], 'text-line-height': 1.25 },
+      layout: { 'text-field': ['get', 'label'], 'text-size': 11.5, 'text-offset': [0, -2.0], 'text-max-width': 28, 'text-font': ['Open Sans Semibold'], 'text-line-height': 1.2 },
       paint: { 'text-color': ['get', 'colour'], 'text-halo-color': '#0b0d10', 'text-halo-width': 2 },
     })
     map.addLayer({ id: 'threat-ring', type: 'line', source: 'threat', paint: { 'line-color': SIDE.hostile.colour, 'line-width': 3, 'line-dasharray': [1, 1] } })
 
-    // Contacts heading arrow + APP-6 icons
+    // Contacts heading arrow + APP-6 icons & compact 1-line labels
     map.addImage('heading-arrow', arrowImage(), { pixelRatio: 2, sdf: true })
     map.addLayer({
       id: 'contact-arrow',
@@ -1601,8 +1840,56 @@ onMounted(async () => {
       id: 'contact-label',
       type: 'symbol',
       source: 'contacts',
-      layout: { 'text-field': ['get', 'label'], 'text-size': 11, 'text-offset': [0, 2.4], 'text-max-width': 30, 'text-font': ['Open Sans Semibold'], 'text-line-height': 1.2 },
+      layout: { 'text-field': ['get', 'label'], 'text-size': 11, 'text-offset': [0, 1.9], 'text-max-width': 28, 'text-font': ['Open Sans Semibold'], 'text-line-height': 1.2 },
       paint: { 'text-color': ['get', 'colour'], 'text-halo-color': '#0b0d10', 'text-halo-width': 2 },
+    })
+
+    // Airborne UAV / Flying Object Directional Flight Arrows + Live Track Trail + Lead Velocity Vector
+    map.addImage('flight-arrow', flightArrowImage(), { pixelRatio: 2, sdf: true })
+    map.addImage('hover-arrow', hoverArrowImage(), { pixelRatio: 2, sdf: true })
+    map.addLayer({
+      id: 'airborne-track-line',
+      type: 'line',
+      source: 'airborne-tracks',
+      paint: { 'line-color': ['get', 'colour'], 'line-width': 2.4, 'line-opacity': 0.72 },
+    })
+    map.addLayer({
+      id: 'airborne-vector-line',
+      type: 'line',
+      source: 'airborne-vectors',
+      paint: { 'line-color': ['get', 'colour'], 'line-width': 2, 'line-dasharray': [2, 2], 'line-opacity': 0.85 },
+    })
+    map.addLayer({
+      id: 'airborne-icon',
+      type: 'symbol',
+      source: 'airborne',
+      layout: {
+        'icon-image': ['get', 'icon'],
+        'icon-rotate': ['get', 'heading'],
+        'icon-rotation-alignment': 'map',
+        'icon-size': 0.72,
+        'icon-allow-overlap': true,
+        'icon-ignore-placement': true,
+      },
+      paint: {
+        'icon-color': ['get', 'colour'],
+        'icon-halo-color': '#080c10',
+        'icon-halo-width': 2,
+      },
+    })
+    map.addLayer({
+      id: 'airborne-label',
+      type: 'symbol',
+      source: 'airborne',
+      layout: {
+        'text-field': ['get', 'label'],
+        'text-size': 11,
+        'text-offset': [0, 1.85],
+        'text-max-width': 28,
+        'text-font': ['Open Sans Semibold'],
+        'text-allow-overlap': true,
+      },
+      paint: { 'text-color': ['get', 'colour'], 'text-halo-color': '#080c10', 'text-halo-width': 2 },
     })
 
     // Ambiguous Candidate Ghost Pins (?1 / ?2 / ?3 / ?4) & Staged Confirmation Preview
@@ -1647,6 +1934,71 @@ onMounted(async () => {
     applyBasemap()
     updateGrid()
     render()
+
+    // Interactive Hover & Click Micro-Tooltip Overlay for Unit & Contact Markers
+    let pinnedPopup = null
+    const hoverPopup = new maplibregl.Popup({
+      closeButton: false,
+      closeOnClick: false,
+      offset: 18,
+      maxWidth: '320px',
+      className: 'tactical-map-popup',
+    })
+
+    const buildMarkerTooltipHtml = (p) => {
+      const titleColor = p.colour || '#ecf2f7'
+      const meta = p.detail ? `<span style="color:#6c8296;font-weight:400">${escapeHtml(p.detail)}</span>` : ''
+      const flightHtml = p.flight ? `<div class="tac-tip-flight">flight: ${escapeHtml(p.flight)}</div>` : ''
+      const threatHtml = p.threat ? `<div class="tac-tip-threat">${escapeHtml(p.threat)}</div>` : ''
+      return `
+        <div class="tac-tip-title">
+          <span style="color:${escapeHtml(titleColor)}">${escapeHtml(p.title || p.label || 'Marker')}</span>
+          ${meta}
+        </div>
+        <div class="tac-tip-coords">coordinates: <strong>${escapeHtml(p.lat)}, ${escapeHtml(p.lon)}</strong> | margin: <strong>±${escapeHtml(p.margin)}m</strong></div>
+        ${flightHtml}
+        ${p.mgrs ? `<div class="tac-tip-mgrs">MGRS: ${escapeHtml(p.mgrs)}</div>` : ''}
+        ${threatHtml}
+      `
+    }
+
+    const INTERACTIVE_LAYERS = ['unit-icon', 'label', 'contact-icon', 'contact-label', 'airborne-icon', 'airborne-label']
+    for (const layerId of INTERACTIVE_LAYERS) {
+      map.on('mouseenter', layerId, (ev) => {
+        if (armedDrop.value.kind) return
+        map.getCanvas().style.cursor = 'pointer'
+        const feat = ev.features?.[0]
+        if (!feat || pinnedPopup) return
+        hoverPopup.setLngLat(feat.geometry.coordinates.slice()).setHTML(buildMarkerTooltipHtml(feat.properties)).addTo(map)
+      })
+      map.on('mouseleave', layerId, () => {
+        if (!armedDrop.value.kind) map.getCanvas().style.cursor = ''
+        hoverPopup.remove()
+      })
+      map.on('click', layerId, (ev) => {
+        if (armedDrop.value.kind) return
+        const feat = ev.features?.[0]
+        if (!feat) return
+        hoverPopup.remove()
+        if (pinnedPopup) {
+          pinnedPopup.remove()
+          pinnedPopup = null
+        }
+        pinnedPopup = new maplibregl.Popup({
+          closeButton: true,
+          closeOnClick: true,
+          offset: 18,
+          maxWidth: '320px',
+          className: 'tactical-map-popup',
+        })
+          .setLngLat(feat.geometry.coordinates.slice())
+          .setHTML(buildMarkerTooltipHtml(feat.properties))
+          .addTo(map)
+        pinnedPopup.on('close', () => {
+          pinnedPopup = null
+        })
+      })
+    }
   })
 
   map.on('moveend', updateGrid)
@@ -1684,10 +2036,26 @@ onMounted(async () => {
     cursor.value = state.events.length
     txs.value = state.transmissions ?? []
   }
+  // Sync local AUTO-PLOT / GATE: ON mode with backend immediately on startup
+  fetch('/api/mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ auto_confirm: !confirmGate.value }),
+  }).catch(() => {})
+
   connect()
   ticker = setInterval(() => {
     now.value = Date.now() / 1000
   }, 5000)
+  // Smooth 10 FPS live flight-arrow motion when moving UAVs / flying objects are active
+  flightTimer = setInterval(() => {
+    if (!live.value || !showContacts.value) return
+    const hasMovingAir = contactsOnMap.value.some((e) => {
+      if (!isAirborneContact(e.contact)) return false
+      return airborneHeadingDeg(e.contact) != null && airborneSpeedMps(e.contact) > 0
+    })
+    if (hasMovingAir) renderAirborne(Date.now() / 1000)
+  }, 100)
   window.addEventListener('keydown', keydown)
   window.addEventListener('keyup', keyup)
   window.addEventListener('blur', blur)
@@ -1701,6 +2069,7 @@ onUnmounted(() => {
   stopWaveform()
   netStop()
   clearInterval(ticker)
+  clearInterval(flightTimer)
   window.removeEventListener('keydown', keydown)
   window.removeEventListener('keyup', keyup)
   window.removeEventListener('blur', blur)
@@ -1734,7 +2103,7 @@ onUnmounted(() => {
       @toggle-nvg="toggleNvg"
       @toggle-red-night="toggleRedNight"
       @toggle-offline="toggleOfflineMode"
-      @toggle-confirm-gate="confirmGate = !confirmGate"
+      @toggle-confirm-gate="setConfirmGate(!confirmGate)"
       @open-phone-mic="phoneModalOpen = true"
     />
 
@@ -1904,7 +2273,7 @@ onUnmounted(() => {
         @pick-candidate="pickCandidate"
         @edit-event="editEvent"
         @preview-event="(ev) => (previewedEvent = ev)"
-        @toggle-confirm-gate="confirmGate = !confirmGate"
+        @toggle-confirm-gate="setConfirmGate(!confirmGate)"
         @run-demo-scenario="runDemoScenario"
         @ingest-messages="ingestMessages"
         @focus-coords="focusCoords"

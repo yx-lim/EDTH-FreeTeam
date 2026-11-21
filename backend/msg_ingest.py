@@ -205,9 +205,55 @@ async def _split_with_gemini(raw_text: str, channel: str) -> list[dict[str, Any]
         return None
 
 
+async def _split_with_ollama(raw_text: str, channel: str) -> list[dict[str, Any]] | None:
+    """Use local on-device Ollama LLM (offline) to split noisy WhatsApp/Email threads into atomic tactical reports."""
+    if (os.getenv("EXTRACTOR") or "").lower() == "rules":
+        return None
+    prompt = (
+        f"Channel: {channel}. Split this WhatsApp/email text into atomic tactical reports (positions, movements, "
+        "contacts). Keep original language (English, French, Ukrainian, Russian) and exact quantities. Ignore greetings.\n"
+        'Return ONLY JSON: {"items": [{"sender": "name", "callsign": "lowercase callsign or null", "timestamp_raw": "", "text": "single report"}]}\n\n'
+        f"{raw_text[:4000]}"
+    )
+    payload = {
+        "model": _extract.OLLAMA_MODEL,
+        "format": "json",
+        "stream": False,
+        "keep_alive": "30m",
+        "options": {"temperature": 0, "num_predict": 450},
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            r = await client.post(_extract.OLLAMA_URL, json=payload)
+            r.raise_for_status()
+        data = json.loads((r.json().get("message") or {}).get("content") or "{}")
+        out = []
+        for it in data.get("items") or []:
+            txt = str(it.get("text") or "").strip()
+            if not txt:
+                continue
+            out.append({
+                "channel": channel,
+                "sender": str(it.get("sender") or channel.title()).strip(),
+                "callsign": it.get("callsign") or _extract_callsign_from_sender(it.get("sender")),
+                "timestamp_raw": str(it.get("timestamp_raw") or "").strip(),
+                "text": txt,
+            })
+        return out or None
+    except Exception:
+        return None
+
+
 async def parse_messages(raw_text: str, requested_channel: str = "auto") -> tuple[str, list[dict[str, Any]]]:
     """Return (detected_channel, list_of_atomic_messages)."""
     channel = detect_channel(raw_text, requested_channel)
+    if _extract.is_offline():
+        if getattr(_extract, "_offline_mode", False):
+            ol_items = await _split_with_ollama(raw_text, channel)
+            if ol_items:
+                return channel, ol_items
+        return channel, _parse_deterministic(raw_text, channel)
     ai_items = await _split_with_gemini(raw_text, channel)
     if ai_items:
         return channel, ai_items

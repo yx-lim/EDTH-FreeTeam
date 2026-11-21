@@ -23,6 +23,8 @@ MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
 MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/chat")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 
 _offline_mode: bool = False
 
@@ -46,6 +48,10 @@ COMPASS = {"north": 0, "north northeast": 22.5, "northeast": 45, "east northeast
            "southwest": 225, "west southwest": 247.5, "west": 270, "west northwest": 292.5, "northwest": 315,
            "north northwest": 337.5}
 TYPES = ["position", "movement", "correction", "holding", "intent", "contact", "other"]
+
+OLLAMA_SYSTEM = """Extract a tactical radio report (EN/FR/UK/RU) as compact JSON (omit null fields):
+{"speaker":"callsign","reports":[{"type":"position|movement|correction|holding|intent|contact|other","anchor":{"name":"exact place as spoken","kind":"landmark|street|unit|grid"},"relation":"at|near|north_of|south_of|east_of|west_of|northeast_of|northwest_of|southeast_of|southwest_of|towards","distance_m":0,"quantity":1,"summary_en":"short English gloss if non-English","contact":{"what":"infantry|sniper|tank|apc|vehicle|artillery|drone|helicopter|aircraft|ied|civilians|unknown","side":"hostile|unknown|friendly|neutral","count":1,"activity":"moving|static|firing","heading":"north|south|east|west|northeast|northwest|southeast|southwest","speed_mps":0}}]}
+Rules: Keep place name in original script (e.g. "Eiffel Tower", "Louvre", "Нотр-Дам"). Speed (km/h, км/год) goes in contact.speed_mps (km/h / 3.6), NEVER in distance_m. Omit contact unless type is "contact"."""
 
 SYSTEM = f"""You turn one radio transmission into JSON for a live map. It may be English or French, may contain
 fillers, radio procedure ("Zero, this is Alpha two ... over") and transcription errors.
@@ -93,7 +99,9 @@ Rules:
 - Something SEEN (enemy, vehicles, drones, aircraft, artillery, IEDs, civilians): a separate report with type "contact",
   subject null, the anchor fields saying where the THING is, plus
   "contact": {{"what": one of {contact.WHATS}, "side": one of {contact.SIDES}, "count": number or null,
-              "activity": "moving" | "static" | "firing" | null, "heading": compass direction or null}}.
+              "activity": "moving" | "static" | "firing" | null, "heading": compass direction or null,
+              "heading_deg": 0-360 numeric flight/movement bearing if spoken ("course 045" -> 45), else null,
+              "speed_mps": speed in metres per second if soldier gives speed or pace ("120 km/h" -> 33.3, "60 knots" -> 30.9, "25 m/s" -> 25, "fast"/"diving" drone -> 42, "slow" drone -> 8, "hovering"/"static" -> 0), else null}}.
   side is "hostile" ONLY if the speaker says enemy/hostile; never infer it. Otherwise "unknown" (civilians: "neutral").
   "300 m east of me" -> anchor {{"name": "me", "kind": "unit"}}, relation "east_of", distance_m 300.
   "moving north" is the heading, not the location. The speaker's own position, if also given, is its own report.
@@ -142,6 +150,98 @@ def model() -> tuple[str, str, str] | None:
     return None
 
 
+def _post_enrich_llm(out: dict, text: str) -> None:
+    for r in out.get("reports") or []:
+        if r.get("type") == "contact" and isinstance(r.get("contact"), dict):
+            c = r["contact"]
+            if c.get("speed_mps") is None:
+                sp = contact.parse_speed_mps(text, what=c.get("what") or "drone", activity=c.get("activity"))
+                if sp is not None:
+                    c["speed_mps"] = sp
+            if c.get("heading_deg") is None:
+                hd = contact.parse_heading_deg(text)
+                if hd is not None:
+                    c["heading_deg"] = round(hd, 1)
+                    if not c.get("heading"):
+                        c["heading"] = contact.compass(hd)
+    if lang_uk.has_cyrillic(text):
+        _enrich_uk(out, text)
+
+
+def _reconcile_offline_llm(out: dict, text: str) -> dict:
+    """Fuse local Ollama output with deterministic stub extraction so small local models never drop anchors, counts, or speeds."""
+    stub = stub_extract(text)
+    if not out.get("speaker") and stub.get("speaker"):
+        out["speaker"] = stub["speaker"]
+    s_reps = stub.get("reports") or []
+    o_reps = out.get("reports") or []
+    if not o_reps:
+        return stub
+    if s_reps:
+        sr = s_reps[0]
+        r = o_reps[0]
+        # Backfill missing anchor from deterministic parser
+        if not (r.get("anchor") or {}).get("name") and (sr.get("anchor") or {}).get("name"):
+            r["anchor"] = sr["anchor"]
+            if sr.get("relation"):
+                r["relation"] = sr["relation"]
+            if sr.get("distance_m") is not None and r.get("distance_m") is None:
+                r["distance_m"] = sr["distance_m"]
+        # If deterministic parser clearly detected a contact (e.g., Shahed / enemy drone / tank), ensure contact fields stay accurate
+        if sr.get("type") == "contact":
+            if r.get("type") != "contact":
+                r["type"] = "contact"
+                r["subject"] = None
+                r["contact"] = dict(sr.get("contact") or {})
+            else:
+                sc = sr.get("contact") or {}
+                oc = dict(r.get("contact") or {})
+                # Always trust deterministic threat vocabulary (e.g., Shahed/drone/tank) and exact parsed speed_mps
+                if sc.get("what") and sc.get("what") != "unknown":
+                    oc["what"] = sc["what"]
+                if sc.get("detail"):
+                    oc["detail"] = sc["detail"]
+                if sc.get("side") == "hostile":
+                    oc["side"] = "hostile"
+                if sc.get("speed_mps") is not None:
+                    oc["speed_mps"] = sc["speed_mps"]
+                for k in ("count", "activity", "heading", "heading_deg", "ttl_s", "word"):
+                    if (oc.get(k) in (None, "", "unknown")) and sc.get(k) not in (None, "", "unknown"):
+                        oc[k] = sc[k]
+                if sc.get("activity") == "moving" and oc.get("activity") == "firing" and not re.search(r"\b(?:fir|shoot|attack|стріл|вогонь)", text, re.I):
+                    oc["activity"] = "moving"
+                r["contact"] = contact.validate(oc)
+        # Guard against small LLM mistaking explicit km/h speed for distance_m (e.g., 180 km/h -> 180000m)
+        sp_det = contact.parse_speed_mps(text, what=(r.get("contact") or {}).get("what") or "drone")
+        if sp_det is not None:
+            if r.get("type") == "contact" and isinstance(r.get("contact"), dict):
+                r["contact"]["speed_mps"] = sp_det
+            if (r.get("distance_m") or 0) >= 3000:
+                r["distance_m"] = sr.get("distance_m")
+                r["relation"] = sr.get("relation") or "at"
+    return out
+
+
+async def _ollama(text: str) -> dict:
+    """Local on-device LLM extraction via Ollama (zero internet, Apple Metal GPU)."""
+    payload = {
+        "model": OLLAMA_MODEL,
+        "format": "json",
+        "stream": False,
+        "keep_alive": "30m",
+        "options": {"temperature": 0, "num_ctx": 1024, "num_predict": 180},
+        "messages": [
+            {"role": "system", "content": OLLAMA_SYSTEM},
+            {"role": "user", "content": text},
+        ],
+    }
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(OLLAMA_URL, json=payload)
+        r.raise_for_status()
+    content = (r.json().get("message") or {}).get("content") or "{}"
+    return _reconcile_offline_llm(validate(json.loads(content)), text)
+
+
 async def extract(text: str) -> dict:
     """Returns {"speaker", "reports": [...], "extractor", "extract_ms"}."""
     t0 = time.perf_counter()
@@ -153,11 +253,37 @@ async def extract(text: str) -> dict:
         try:
             out = await (_gemini if name == "gemini" else _mistral)(text, key)
             out["extractor"] = label
-            if lang_uk.has_cyrillic(text):
-                _enrich_uk(out, text)
+            _post_enrich_llm(out, text)
         except Exception as err:  # network, quota, malformed JSON: degrade, don't drop the report
             out = stub_extract(text)
             out["extractor"] = f"rules ({name} failed: {type(err).__name__})"
+            if lang_uk.has_cyrillic(text):
+                _enrich_uk(out, text)
+    elif _offline_mode or (os.getenv("EXTRACTOR") or "").lower() == "ollama":
+        # Fast-first Offline AI: try instant deterministic parse (~2ms) first; invoke local Ollama LLM
+        # whenever the transcript is complex/unparsed (missing anchor or chatter) OR EXTRACTOR=ollama is forced!
+        force_ollama = (os.getenv("EXTRACTOR") or "").lower() == "ollama"
+        stub = stub_extract(text)
+        stub_has_anchor = any(
+            (r.get("anchor") or {}).get("name") or r.get("type") == "holding"
+            for r in (stub.get("reports") or [])
+            if r.get("type") != "other"
+        )
+        if not force_ollama and stub_has_anchor:
+            out = stub
+            out["extractor"] = "rules+offline-llm-ready (offline)"
+            if lang_uk.has_cyrillic(text):
+                _enrich_uk(out, text)
+        elif (os.getenv("EXTRACTOR") or "").lower() != "rules":
+            try:
+                out = await _ollama(text)
+                out["extractor"] = f"ollama:{OLLAMA_MODEL} (offline)"
+                _post_enrich_llm(out, text)
+            except Exception:
+                out = stub
+                out["extractor"] = "rules (offline)"
+                if lang_uk.has_cyrillic(text):
+                    _enrich_uk(out, text)
     if out is None:
         out = stub_extract(text)
         out["extractor"] = "rules (offline)" if _offline_mode else "rules"

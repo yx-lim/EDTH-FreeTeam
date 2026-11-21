@@ -7,6 +7,7 @@ spoken,lang,what,detail,ttl_s,side,status,notes
 мопед,uk,drone,Shahed,120,hostile,sourced,named for its engine sound; Russian-only system
 шахед,uk,drone,Shahed,120,hostile,sourced,
 шахід,uk,drone,Shahed,120,hostile,check,
+шахид,uk,drone,Shahed,120,hostile,check,Whisper phonetic spelling of Shahed
 герань,ru,drone,Shahed,120,hostile,sourced,Russian official name
 гербера,uk,drone,Gerbera decoy,120,hostile,check,cheap Shahed decoy
 баба яга,uk,drone,heavy bomber drone,300,,sourced,large hexacopter bomber (used by Ukrainian units: side never assumed)

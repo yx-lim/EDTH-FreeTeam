@@ -43,6 +43,7 @@ net = Net(tracker, log=DATA / "net.jsonl")   # radio-net mode: every transmissio
 clients: set[WebSocket] = set()
 handsets: dict[WebSocket, dict] = {}
 replay_task: asyncio.Task | None = None
+auto_confirm_mode: bool = False   # toggled to True by frontend AUTO-PLOT mode; defaults False so unit tests stay strict
 
 
 def _lan_ip() -> str:
@@ -96,6 +97,8 @@ async def publish(events: list[dict]) -> list[dict]:
     for e in events:
         if e.get("corrects"):
             await broadcast({"type": "supersede", "id": e["corrects"], "by": e["id"]})
+        if auto_confirm_mode and e.get("ok") and not e.get("superseded") and not e.get("confirmed"):
+            tracker.annotate(e["id"], confirmed=True, confirmed_at=time.time(), auto_confirmed=True)
         pub = tracker.public(e)
         await broadcast({"type": "event", "event": pub})
         out.append(pub)
@@ -205,7 +208,7 @@ def state() -> dict:
     return {"centre": [gaz.proj.lon0, gaz.proj.lat0], "bbox": gaz.bbox, "places": len(gaz.places),
             "events": [tracker.public(e) for e in tracker.events], "custom_places": gaz.custom(),
             "transmissions": net.transmissions[-500:], "stt": stt.provider(), "stt_options": stt.available(),
-            "offline": extractor.is_offline(), "handsets": _handset_summary()}
+            "offline": extractor.is_offline(), "auto_confirm": auto_confirm_mode, "handsets": _handset_summary()}
 
 
 @app.get("/offline-basemap.geojson")
@@ -214,20 +217,64 @@ def offline_basemap() -> dict:
     return gaz.offline_basemap()
 
 
+# Minimal 1x1 light-grey PNG (inverts to #090e14 under MapLibre's Dark Ops paint) for uncached tiles outside Paris
+_FALLBACK_TILE_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+    b"\x00\x00\x00\x0cIDATx\x9cc\xf8\xef\xef\x0f\x00\x05\xc6\x02\xbd\xa4\xc8\x8d\x96\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+@app.get("/tiles/{z}/{x}/{y}.jpg")
+def offline_tile(z: int, x: int, y: int) -> Response:
+    """Serve locally cached Paris & surrounding map tiles with zero internet."""
+    p = DATA / "offline_tiles" / str(z) / str(x) / f"{y}.jpg"
+    if p.exists():
+        return Response(p.read_bytes(), media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
+    return Response(_FALLBACK_TILE_PNG, media_type="image/png", headers={"Cache-Control": "public, max-age=300"})
+
+
+@app.get("/offline-status")
+def offline_status() -> dict:
+    """Report readiness of local offline stack (MLX Whisper, Ollama LLM, cached Paris tiles, local landmarks)."""
+    tile_dir = DATA / "offline_tiles"
+    tile_count = sum(1 for _ in tile_dir.rglob("*.jpg")) if tile_dir.exists() else 0
+    return {
+        "offline_mode": extractor.is_offline(),
+        "mlx_whisper": stt._mlx_installed(),
+        "mlx_whisper_model": stt.MLX_WHISPER_MODEL,
+        "ollama_model": extractor.OLLAMA_MODEL,
+        "cached_tiles": tile_count,
+        "local_places": len(gaz.places),
+    }
+
+
 class ModeChoice(BaseModel):
-    offline: bool
+    offline: bool | None = None
+    auto_confirm: bool | None = None
 
 
 @app.get("/mode")
 def mode_get() -> dict:
-    return {"offline": extractor.is_offline(), "stt": stt.provider()}
+    return {"offline": extractor.is_offline(), "auto_confirm": auto_confirm_mode, "stt": stt.provider()}
 
 
 @app.post("/mode")
 async def mode_set(body: ModeChoice) -> dict:
-    """Live switch between Hybrid AI (Gemini + OSM + ElevenLabs) and 100% Offline Ops (rules + local gazetteer)."""
-    extractor.set_offline(body.offline)
-    out = {"offline": extractor.is_offline(), "stt": stt.provider()}
+    """Live switch between Hybrid AI / Offline Ops and AUTO-PLOT (auto-confirm clear reports) / GATE: ON."""
+    global auto_confirm_mode
+    if body.offline is not None:
+        extractor.set_offline(body.offline)
+    if body.auto_confirm is not None:
+        auto_confirm_mode = bool(body.auto_confirm)
+        if auto_confirm_mode:
+            # Auto-confirm all existing pending reports immediately so AUTO-PLOT clears the queue cleanly
+            now_t = time.time()
+            for e in tracker.events:
+                if e.get("ok") and not e.get("superseded") and not e.get("rejected") and not e.get("confirmed"):
+                    fields = {"confirmed": True, "confirmed_at": now_t, "auto_confirmed": True}
+                    tracker.annotate(e["id"], **fields)
+                    await broadcast({"type": "annotate", "id": e["id"], "fields": fields})
+    out = {"offline": extractor.is_offline(), "auto_confirm": auto_confirm_mode, "stt": stt.provider()}
     await broadcast({"type": "mode", **out})
     return out
 
@@ -253,11 +300,12 @@ class EventEdit(BaseModel):
     what: str | None = None
     activity: str | None = None
     heading: str | None = None
+    speed_mps: float | None = None
 
 
 @app.patch("/events/{event_id}")
 async def edit_event(event_id: int, body: EventEdit) -> dict:
-    """Operator factual correction (e.g., quantity 2 tanks -> 3 tanks, side unknown -> hostile)."""
+    """Operator factual correction (e.g., quantity 2 tanks -> 3 tanks, side unknown -> hostile, UAV speed)."""
     event = tracker.edit_event(
         event_id,
         count=body.count,
@@ -265,6 +313,7 @@ async def edit_event(event_id: int, body: EventEdit) -> dict:
         what=body.what,
         activity=body.activity,
         heading=body.heading,
+        speed_mps=body.speed_mps,
     )
     if event is None:
         raise HTTPException(404, f"no event {event_id}")

@@ -3240,3 +3240,229 @@ select {
     grid-template-columns: 1fr;
   }
 }
+
+/* =====================================================================
+ * ERGONOMIC SIMPLIFICATION STYLES
+ * (1. Compact Map Tooltips, 2. Single-Line Active Unit Badge,
+ *  3. Collapsed Voice Comms Drawer, 4. Concise Event Notification Card)
+ * ===================================================================== */
+
+/* 1. MapLibre Dark Tactical Hover / Click Micro-Tooltip */
+.tactical-map-popup {
+  z-index: 12;
+}
+
+.tactical-map-popup .maplibregl-popup-content {
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-left: 2.5px solid var(--accent-gold);
+  border-radius: 5px;
+  background: rgba(10, 16, 23, 0.95);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.4;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(8px);
+}
+
+.tactical-map-popup .maplibregl-popup-tip {
+  border-top-color: rgba(10, 16, 23, 0.95) !important;
+  border-bottom-color: rgba(10, 16, 23, 0.95) !important;
+}
+
+.tactical-map-popup .maplibregl-popup-close-button {
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 2px 5px;
+  right: 2px;
+  top: 1px;
+}
+
+.tactical-map-popup .maplibregl-popup-close-button:hover {
+  color: var(--text-primary);
+  background: transparent;
+}
+
+.tac-tip-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 3px;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+
+.tac-tip-coords {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.tac-tip-coords strong {
+  color: var(--accent-cyan);
+  font-weight: 600;
+}
+
+.tac-tip-mgrs {
+  margin-top: 2px;
+  color: var(--accent-gold);
+  font-weight: 600;
+  font-size: 10px;
+}
+
+.tac-tip-flight {
+  margin-top: 2px;
+  color: #fde68a;
+  font-weight: 600;
+  font-size: 10px;
+}
+
+.tac-tip-threat {
+  margin-top: 3px;
+  color: #fca5a5;
+  font-weight: 700;
+  font-size: 10px;
+}
+
+/* 2. Reduced Top-Right Active Selected Unit Single-Line Badge */
+.sidebar-hero-card.is-compact {
+  padding: 9px 12px;
+  gap: 0;
+}
+
+.sidebar-hero-card.is-compact .callsign-input {
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.selected-unit-tag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  padding-right: 4px;
+}
+
+/* 3. Collapsible Voice Comms Drawer (Collapsed by Default) */
+.control-panel.is-collapsible {
+  padding: 8px 12px;
+}
+
+.voice-drawer-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: linear-gradient(180deg, #172330 0%, #111a24 100%);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.voice-drawer-toggle:hover {
+  border-color: var(--accent-gold);
+  background: linear-gradient(180deg, #1c2a3a 0%, #141f2b 100%);
+}
+
+.voice-drawer-toggle.is-open {
+  border-color: rgba(56, 189, 248, 0.55);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.18);
+}
+
+.voice-drawer-toggle.is-tx {
+  border-color: var(--accent-red);
+  background: rgba(127, 29, 29, 0.32);
+  box-shadow: 0 0 14px rgba(239, 68, 68, 0.25);
+}
+
+.voice-drawer-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-primary);
+}
+
+.voice-drawer-left svg {
+  color: var(--accent-gold);
+}
+
+.voice-drawer-toggle.is-tx .voice-drawer-left svg {
+  color: var(--accent-red);
+}
+
+.voice-drawer-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-muted);
+}
+
+.voice-toggle-pill {
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: rgba(9, 14, 20, 0.8);
+  color: var(--text-secondary);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.voice-toggle-pill.is-on {
+  border-color: rgba(56, 189, 248, 0.55);
+  background: rgba(56, 189, 248, 0.14);
+  color: #bae6fd;
+}
+
+.voice-toggle-pill.is-tx {
+  border-color: var(--accent-red);
+  background: rgba(239, 68, 68, 0.24);
+  color: #fecaca;
+}
+
+.voice-drawer-body {
+  margin-top: 10px;
+}
+
+/* 4. Concise Event Notification Card (No Verbose Repetitive Footer) */
+.extraction-panel.is-concise {
+  padding: 10px 11px;
+}
+
+.extraction-panel.is-concise .panel-heading {
+  margin-bottom: 8px;
+}
+
+.extraction-panel.is-concise .context-class-row {
+  margin-bottom: 0;
+}
+
+.extraction-panel.is-concise .translation-gloss {
+  margin-top: 7px;
+}
+
+.extraction-panel.is-concise .threat-alert-strip {
+  margin-top: 7px;
+}
+
+.extraction-panel.is-concise .candidate-picker {
+  margin-top: 8px;
+}
+
+.extraction-panel.is-concise .extraction-footer {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(37, 51, 66, 0.65);
+}

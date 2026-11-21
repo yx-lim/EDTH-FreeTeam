@@ -16,7 +16,7 @@ import csv
 import re
 from pathlib import Path
 
-from . import lang_uk
+from . import contact as _contact, lang_uk
 from .lang_uk import _alt, fold
 
 VOCAB = Path(__file__).resolve().parent.parent / "data" / "threat_vocab.csv"
@@ -106,18 +106,31 @@ def describe(text: str) -> dict:
     side = ("hostile" if re.search(rf"\b{HOSTILE}\b", t) or (row and row.get("side") == "hostile")
             else "neutral" if what == "civilians" else "unknown")
     head = heading(text)
+    head_deg = _contact.parse_heading_deg(text)
+    if head_deg is not None and head is None:
+        head = _contact.compass(head_deg)
     activity = ("firing" if re.search(rf"\b{FIRING}\b", t) else "static" if re.search(rf"\b{STATIC}\b", t)
                 or (row and int(row["ttl_s"] or 0) >= 1800 and what == "drone") else "moving" if head
                 or re.search(rf"\b{MOVING}\b", t) else None)
-    return {"what": what, "side": side, "count": int(count) if count else None, "activity": activity, "heading": head,
-            "detail": (row or {}).get("detail") or ("group of people" if what == "infantry" else None),
-            "ttl_s": int(row["ttl_s"]) if row and row.get("ttl_s") else (900 if what == "infantry" else None),
-            "word": (row or {}).get("spoken"), "another": bool(re.search(rf"\b{ANOTHER}\b", t))}
+    speed_mps = _contact.parse_speed_mps(text, what=what, activity=activity)
+    if speed_mps and speed_mps > 0 and activity is None:
+        activity = "moving"
+    out = {"what": what, "side": side, "count": int(count) if count else None, "activity": activity, "heading": head,
+           "detail": (row or {}).get("detail") or ("group of people" if what == "infantry" else None),
+           "ttl_s": int(row["ttl_s"]) if row and row.get("ttl_s") else (900 if what == "infantry" else None),
+           "word": (row or {}).get("spoken"), "another": bool(re.search(rf"\b{ANOTHER}\b", t))}
+    if head_deg is not None:
+        out["heading_deg"] = round(head_deg, 1)
+    if speed_mps is not None:
+        out["speed_mps"] = speed_mps
+    return out
 
 
 def location_text(text: str) -> str:
     """The sighting with what/how-many/how-it-moves words removed, so only where it is remains."""
-    t = lang_uk.fold_keep(text)
+    t = _contact._SPEED_STRIP_RE.sub(" ", text)
+    t = _contact._NUMERIC_HEADING_RE.sub(" ", t)
+    t = lang_uk.fold_keep(t)
     t = re.sub(rf"\b(?:{MOVING})\s+(?:на|в|у|к)?\s*(?:{lang_uk._DIR})(?:\s+(?:вид|от)\s+[^,.;]+)?", " ", t)
     t = re.sub(rf"\b(?:{MOVING})\s+(?:до|к|в напрямку|в сторону)\s+[^,.;]+", " ", t)   # a destination, not where it is
     t = re.sub(r"\bкурс\s+(?:на\s+)?\w+", " ", t)
