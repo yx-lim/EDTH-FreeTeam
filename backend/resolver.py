@@ -7,6 +7,7 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import nearest_points, substring
 
+from . import lang_uk
 from .geo import Gazetteer, Place, norm
 
 WALK_MPS = 1.5          # how far a unit has probably moved since its last report
@@ -40,6 +41,8 @@ def candidates(name: str, gaz: Gazetteer, units: dict[str, BaseGeometry] | None,
         key = key.replace(f" {n}", f" {w}")
     if units and key in units:
         return [Place(key, "unit", "unit", units[key])]
+    if units and lang_uk.has_cyrillic(name) and (hit := lang_uk.unit_lookup(name, units)):
+        return [Place(hit, "unit", "unit", units[hit])]
     return gaz.find(name, near=near, kind=kind)
 
 

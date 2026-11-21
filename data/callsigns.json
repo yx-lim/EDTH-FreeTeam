@@ -1,0 +1,10 @@
+{
+  "_note": "Operator's callsign table: the canonical callsign, then other ways it is said (Russian spelling, a different word for the same unit). Invented callsigns only.",
+  "callsigns": {
+    "Сокіл": ["Сокол"],
+    "Граніт": ["Гранит"],
+    "Лис": ["Лиса"],
+    "Птаха": ["Птица"],
+    "Вежа": ["Башня"]
+  }
+}

@@ -55,6 +55,7 @@ class NewPlace(BaseModel):
     name: str
     lon: float
     lat: float
+    aliases: list[str] = []       # other spoken names: "Вторая посадка" for "Друга посадка"
 
 
 async def broadcast(message: dict) -> None:
@@ -183,7 +184,7 @@ async def add_place(body: NewPlace) -> dict:
     """Operator-named points ("checkpoint 3", "rally point bravo") become valid anchors immediately."""
     if not body.name.strip():
         raise HTTPException(400, "name required")
-    gaz.add_custom(body.name.strip(), body.lon, body.lat)
+    gaz.add_custom(body.name.strip(), body.lon, body.lat, body.aliases)
     await broadcast({"type": "places", "places": gaz.custom()})
     return {"places": gaz.custom()}
 

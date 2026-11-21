@@ -14,6 +14,7 @@ import unicodedata
 
 import httpx
 
+from . import lang_uk
 from .geo import norm
 
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
@@ -91,6 +92,8 @@ async def _mistral(text: str, key: str) -> dict:
 def _callsign(text: str | None) -> str | None:
     if not text:
         return None
+    if lang_uk.has_cyrillic(text):
+        return lang_uk.callsign(text)
     t = norm(text)
     for w, d in _DIGITS.items():
         t = re.sub(rf"\b{w}\b", d, t)

@@ -16,10 +16,13 @@ from shapely.geometry import LineString, Point, mapping, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import substring, unary_union
 
+from . import lang_uk
+
 DATA = Path(__file__).resolve().parent.parent / "data"
 GAZETTEER = DATA / "gazetteer.json"
 ALIASES = DATA / "aliases.json"          # hand-written spoken names -> OSM names
 CUSTOM = DATA / "custom_places.json"     # operator-named points ("checkpoint 3"), added at runtime
+CODENAMES = DATA / "codenames.json"      # mission codenames for the day (Ромашка, Сарай), loaded as operator points
 
 # Generic words a speaker may use instead of a proper name.
 CATEGORY_WORDS = {
@@ -78,6 +81,8 @@ class Place:
     category: str    # e.g. "church", "park", "custom", "" if unknown
     geom: BaseGeometry  # metres, local projection
     words: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)   # other spoken names (codenames: "Вторая посадка")
+    seeded: bool = False                               # loaded from data/codenames.json, not added by the operator
 
     def __post_init__(self):
         self.words = self.words or words(self.name)
@@ -92,7 +97,8 @@ class Place:
 
 
 class Gazetteer:
-    def __init__(self, path: Path = GAZETTEER, aliases: Path = ALIASES, custom: Path = CUSTOM):
+    def __init__(self, path: Path = GAZETTEER, aliases: Path = ALIASES, custom: Path = CUSTOM,
+                 codenames: Path = CODENAMES):
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
         lat0, lon0 = raw["centre"]
         self.bbox = raw.get("bbox")
@@ -113,23 +119,32 @@ class Gazetteer:
             else:
                 merged[(p.key, p.kind)] = p
         self.places = rest + list(merged.values())
-        self.aliases = {}
+        self.aliases, self._spoken = {}, {}
         if Path(aliases).exists():
-            self.aliases = {norm(k): v for k, v in json.loads(Path(aliases).read_text(encoding="utf-8"))["aliases"].items()}
+            self._spoken = json.loads(Path(aliases).read_text(encoding="utf-8"))["aliases"]
+            self.aliases = {norm(k): v for k, v in self._spoken.items()}
+        self._cyr: dict[str, str] | None = None
+        if codenames and Path(codenames).exists():
+            for c in json.loads(Path(codenames).read_text(encoding="utf-8"))["codenames"]:
+                self._add_custom(c["name"], c["lon"], c["lat"], c.get("aliases", []), seeded=True)
         self.custom_path = Path(custom)
         if self.custom_path.exists():
             for c in json.loads(self.custom_path.read_text(encoding="utf-8")):
-                self._add_custom(c["name"], c["lon"], c["lat"])
+                self._add_custom(c["name"], c["lon"], c["lat"], c.get("aliases", []))
 
     # --- operator-named points -------------------------------------------------------------
-    def _add_custom(self, name: str, lon: float, lat: float) -> Place:
-        place = Place(name, "landmark", "custom", self.proj.to_xy(Point(lon, lat)))
+    def _add_custom(self, name: str, lon: float, lat: float, aliases=(), seeded: bool = False) -> Place:
+        place = Place(name, "landmark", "custom", self.proj.to_xy(Point(lon, lat)),
+                      aliases=[a for a in aliases if a.strip()], seeded=seeded)
         self.places = [p for p in self.places if not (p.category == "custom" and p.key == place.key)] + [place]
+        self._cyr = None
         return place
 
-    def add_custom(self, name: str, lon: float, lat: float) -> Place:
-        place = self._add_custom(name, lon, lat)
-        self.custom_path.write_text(json.dumps(self.custom(), ensure_ascii=False, indent=1), encoding="utf-8")
+    def add_custom(self, name: str, lon: float, lat: float, aliases=()) -> Place:
+        place = self._add_custom(name, lon, lat, aliases)
+        # Seeded codenames come from data/codenames.json every start; only the operator's own points are saved.
+        own = [c for c in self.custom() if not c["seeded"]]
+        self.custom_path.write_text(json.dumps(own, ensure_ascii=False, indent=1), encoding="utf-8")
         return place
 
     def custom(self) -> list[dict]:
@@ -137,8 +152,20 @@ class Gazetteer:
         for p in self.places:
             if p.category == "custom":
                 ll = self.proj.to_ll(p.geom)
-                out.append({"name": p.name, "lon": round(ll.x, 6), "lat": round(ll.y, 6)})
+                out.append({"name": p.name, "lon": round(ll.x, 6), "lat": round(ll.y, 6), "aliases": p.aliases,
+                            "seeded": p.seeded})
         return out
+
+    def _cyrillic_index(self) -> dict[str, str]:
+        """Cyrillic spoken names -> place name, matched with case endings (see lang_uk). Closed set only: the
+        alias table and operator points with their aliases, never the open list of OSM names."""
+        if self._cyr is None:
+            names = {k: v for k, v in self._spoken.items() if lang_uk.has_cyrillic(k)}
+            for p in self.places:
+                if p.category == "custom":
+                    names.update({n: p.name for n in [p.name, *p.aliases] if lang_uk.has_cyrillic(n)})
+            self._cyr = lang_uk.index_of(names)
+        return self._cyr
 
     def vocabulary(self, limit: int = 100) -> list[str]:
         """Names worth priming speech-to-text with: custom points, aliases, then the biggest places."""
@@ -154,6 +181,13 @@ class Gazetteer:
     # --- lookup ------------------------------------------------------------------------------
     def find(self, name: str, near: BaseGeometry | None = None, kind: str | None = None, shrink: bool = True) -> list[Place]:
         """Candidates for a spoken anchor, best first. Empty list means unknown: never guess."""
+        if lang_uk.has_cyrillic(name):
+            # OSM names here are Latin script, so a Cyrillic name must hit the closed set (codenames, aliases,
+            # operator points). No hit means unknown, never a fuzzy guess ("Романа" is not "Ромашка").
+            hit = lang_uk.lookup(name, self._cyrillic_index())
+            if hit is None:
+                return []
+            name = hit
         q_norm = " ".join(t for t in norm(name).split() if t not in ("the", "la", "le", "l", "les"))
         if q_norm in self.aliases:
             name = self.aliases[q_norm]

@@ -1,0 +1,9 @@
+{
+  "_note": "Demo mission codenames (invented), loaded as operator points. Codenames rotate daily in practice; replace this file each morning. Points sit inside the Paris 6e gazetteer.",
+  "codenames": [
+    {"name": "Ромашка", "aliases": [], "lat": 48.8468, "lon": 2.3345},
+    {"name": "Друга посадка", "aliases": ["Вторая посадка", "Другая посадка"], "lat": 48.8486, "lon": 2.3345},
+    {"name": "Сарай", "aliases": [], "lat": 48.8525, "lon": 2.3300},
+    {"name": "Орієнтир 3", "aliases": ["Ориентир 3"], "lat": 48.8530, "lon": 2.3390}
+  ]
+}
