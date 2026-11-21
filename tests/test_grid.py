@@ -100,8 +100,25 @@ def test_guesses_are_flagged_for_read_back():
     assert hit.grid == SARAI and "distance" in hit.ambiguous
     clean = parse_spoken_grid(SPOKEN[2][0])        # a pause before "two zero metres": no guess needed
     assert clean.grid == SARAI and clean.ambiguous is None
-    count = parse_spoken_grid("grid 31U DQ 5978 0936, two, moving west")
-    assert count.grid == SARAI and "ignored" in count.ambiguous
+    count = parse_spoken_grid("grid 31U DQ 5978 0936, two, moving west")   # the pause makes it clear
+    assert count.grid == SARAI and count.ambiguous is None
+
+
+def test_full_stop_between_numbers_is_a_pause():
+    # was "31U DQ 59 78": a wrong 1 km square, with no warning
+    assert find_spoken_grid("grid 31U DQ 5978.0936") == SARAI
+    assert find_spoken_grid("grid 31U DQ 5978. 0936, over") == SARAI
+    assert find_spoken_grid("квадрат 31U DQ 5978 0936. 200 метрів на південь") == SARAI
+    assert find_spoken_grid("Grid 31U DQ 5978 0936. Over.") == SARAI
+
+
+def test_one_metre_flag_only_without_area_check():
+    one_m = "grid thirty one uniform delta quebec five eight eight zero two one zero three two one over"
+    assert "1 m" in parse_spoken_grid(one_m).ambiguous
+    hit = parse_spoken_grid(one_m, near=VINCENNES)
+    assert hit.grid == "31U DQ 58802 10321" and hit.ambiguous is None and hit.problem is None
+    glued = "grid three one uniform delta quebec five nine seven eight zero nine three six two zero"
+    assert parse_spoken_grid(glued, near=VINCENNES).problem          # stray "two zero": rejected, not plotted
 
 
 def test_hit_carries_position_and_square():

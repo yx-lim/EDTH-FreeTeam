@@ -163,6 +163,8 @@ def _symbols(text: str) -> list[tuple[str, str, list[str]]]:
             add("D", tok)
         elif tok in ",;:":
             add("P", tok)
+        elif tok == "." and prev_digits and nxt.isdigit():
+            add("P", tok)          # "5978.0936" or "...0936. 200 метрів": a pause between numbers, not an end
         elif tok in ".!?":
             add("W", tok)
         elif low in TENS and DIGITS.get(nxt, "0") != "0":   # "тридцять один" -> 31
@@ -190,6 +192,9 @@ def _symbols(text: str) -> list[tuple[str, str, list[str]]]:
     return out
 
 
+_ONE_METRE = "1 m grids are rare on the radio: check the last digits were not a separate number"
+
+
 def _even(d: str) -> bool:
     return len(d) % 2 == 0 and 0 < len(d) <= 10
 
@@ -210,13 +215,12 @@ def _pick_digits(groups: list[list[str]], unit_follows: bool) -> tuple[str | Non
             if 1 <= len(digits) - keep <= 3:
                 return digits[:keep], f"read the last {len(digits) - keep} digits as a distance, not part of the grid"
         return None, None
-    # "... zero nine three six, two" (a count after a pause): a grid half is never under 3 digits after a pause.
+    # "... zero nine three six, two" (a count after a pause): a grid half is never under 3 digits after a pause,
+    # so the pause makes this clear and no read-back is needed.
     if by_pause and _even(by_pause[0]) and len(by_pause[0]) >= 4 and len(by_pause[1]) <= 3:
-        return by_pause[0], f"ignored the number after the grid ({by_pause[1]})"
+        return by_pause[0], None
     if _even(digits):
-        doubt = "1 m grids are rare on the radio: check the last digits were not a separate number" \
-            if len(digits) == 10 else None
-        return digits, doubt
+        return digits, _ONE_METRE if len(digits) == 10 else None
     if len(digits) % 2 == 1 and len(digits) - 1 <= 10 and len(digits) > 1:
         return digits[:-1], f"odd number of digits; dropped the last one ({digits[-1]})"
     return None, None
@@ -258,6 +262,10 @@ def parse_spoken_grid(text: str, near: tuple[float, float] | None = None, max_km
             hit.problem = "no digits: only names a 100 km square"
         elif near is not None and (far := distance_km(near, (lat, lon))) > max_km:
             hit.problem = f"{far:,.0f} km from the area of operations; probably misheard"
+        elif near is not None and doubt == _ONE_METRE:
+            # A stray number glued onto a grid shifts the northing digits, which usually moves it tens of km,
+            # and the area check above already catches that.
+            hit.ambiguous = None
         return hit
     return None
 
