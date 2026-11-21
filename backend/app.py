@@ -10,12 +10,13 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 load_dotenv()
 
+from . import export as exports  # noqa: E402
 from . import stt, vad  # noqa: E402  (after load_dotenv so keys are visible)
 from .geo import Gazetteer  # noqa: E402
 from .net import Net  # noqa: E402
@@ -201,6 +202,31 @@ async def confirm(event_id: int) -> dict:
         raise HTTPException(404, f"no event {event_id}")
     await broadcast({"type": "annotate", "id": event_id, "fields": fields})
     return tracker.public(event)
+
+
+@app.post("/events/{event_id}/reject")
+async def reject(event_id: int) -> dict:
+    """The duty officer rules a report out: it leaves the map (the unit falls back to its previous fix, a contact
+    track to its previous sighting) and stays in the log, marked rejected."""
+    event = tracker.reject(event_id)
+    if event is None:
+        raise HTTPException(404, f"no event {event_id}")
+    fields = {k: event[k] for k in ("rejected", "superseded", "rejected_at")}
+    await broadcast({"type": "annotate", "id": event_id, "fields": fields})
+    return tracker.public(event)
+
+
+@app.get("/picture.nvg")
+def picture_nvg(drafts: bool = False) -> Response:
+    """The current picture as NATO Vector Graphics (APP-6 symbols): confirmed items only unless ?drafts=true."""
+    return Response(exports.nvg(exports.items(tracker, drafts)), media_type="application/xml",
+                    headers={"Content-Disposition": 'attachment; filename="picture.nvg"'})
+
+
+@app.get("/picture.geojson")
+def picture_geojson(drafts: bool = False) -> dict:
+    """The current picture (not the history) as GeoJSON with SIDC, MGRS and draft flags."""
+    return exports.geojson(exports.items(tracker, drafts))
 
 
 @app.get("/export.geojson")

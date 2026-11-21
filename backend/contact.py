@@ -181,3 +181,25 @@ _POINTS = ["north", "northeast", "east", "southeast", "south", "southwest", "wes
 
 def compass(bearing_deg: float) -> str:
     return _POINTS[round(bearing_deg / 45) % 8]
+
+
+def persistent(c: dict | None) -> bool:
+    """Static hazards (mines, IEDs, fibre-optic cables, drones waiting on the ground) are never removed by age: nobody
+    radios "mine cleared". Past their fresh window they stay on the map as "unconfirmed, N h old"."""
+    c = c or {}
+    return c.get("what") == "ied" or (c.get("ttl_s") or 0) >= 1800
+
+
+# --- APP-6 / MIL-STD-2525C symbol codes, for exports (frontend/src/App.vue draws the same codes) -------------------
+_SIDE_CODE = {"hostile": "H", "unknown": "U", "neutral": "N", "friendly": "F"}
+_FUNCTION = {"infantry": "GPUCI", "sniper": "GPUCIS", "tank": "GPEVAT", "apc": "GPEVAA", "vehicle": "GPEV",
+             "artillery": "GPUCF", "drone": "APMFQ", "helicopter": "APMH", "aircraft": "APMF", "ied": "GPEXI",
+             "civilians": "GP", "unknown": "GP"}
+OWN_UNIT = "GPUCI"   # friendly infantry
+
+
+def sidc(c: dict | None, doubt: bool = False, side: str | None = None) -> str:
+    """15-character SIDC. Status P (present, solid frame) or A (anticipated/suspected, dashed frame)."""
+    c = c or {}
+    f = _FUNCTION.get(c.get("what"), "GP") if side is None else OWN_UNIT
+    return f"S{_SIDE_CODE.get(side or c.get('side'), 'U')}{f[0]}{'A' if doubt else 'P'}{f[2:]}".ljust(15, "-")

@@ -123,7 +123,49 @@ class Tracker:
                                           "seen_by": event.get("seen_by") or []}
 
     def _live_tracks(self, now: float):
-        return [(cs, tr) for cs, tr in self.tracks.items() if 0 <= now - tr["t"] <= contacts.ttl(tr["contact"])]
+        return [(cs, tr) for cs, tr in self.tracks.items()
+                if 0 <= now - tr["t"] and (now - tr["t"] <= contacts.ttl(tr["contact"]) or contacts.persistent(tr["contact"]))]
+
+    # --- duty officer: drafts, confirm, reject -------------------------------------------------------------------
+    def reject(self, event_id: int) -> dict | None:
+        """The officer rules a report out: it leaves the map (the unit falls back to its previous fix, the contact
+        track to its previous sighting) but stays in the log, marked rejected."""
+        event = self.get(event_id)
+        if event is None:
+            return None
+        self._withdraw(event)
+        return self.annotate(event_id, rejected=True, superseded=True, rejected_at=time.time())
+
+    def _withdraw(self, event: dict) -> None:
+        if event.get("type") == "contact":
+            track = self.tracks.get(event["callsign"])
+            if track and track["id"] == event["id"]:
+                prev = next((e for e in reversed(self.events) if e["callsign"] == event["callsign"] and e["id"] != event["id"]
+                             and e.get("ok") and e.get("region") and not e.get("superseded")), None)
+                if prev:
+                    self._track(prev, self.gaz.proj.to_xy(shape(prev["region"])))
+                else:
+                    del self.tracks[event["callsign"]]
+        else:
+            fixes = self.history.get(event["callsign"]) or []
+            fixes[:] = [f for f in fixes if f[0] != event["id"]]
+
+    def track_confirmed(self, callsign: str) -> bool:
+        return any(e.get("confirmed") for e in self.events if e["callsign"] == callsign and e.get("type") == "contact")
+
+    def is_draft(self, event: dict) -> bool:
+        """Needs the duty officer: a sighting until confirmed or seen by two stations; a unit fix only when there is
+        real doubt (ambiguous place, assumed callsign) and nobody has confirmed it."""
+        if event.get("type") == "contact":
+            return not (event.get("corroborated") or self.track_confirmed(event["callsign"]))
+        return bool((event.get("ambiguous") or event.get("callsign_assumed")) and not event.get("confirmed"))
+
+    def picture(self, now: float | None = None) -> list[dict]:
+        """The current picture: each unit's standing fix and each live (or persistent) contact track."""
+        now = time.time() if now is None else now
+        units = [self.get(h[-1][0]) for h in self.history.values() if h]
+        tracks = [self.get(tr["id"]) for _, tr in self._live_tracks(now)]
+        return [e for e in units + tracks if e]
 
     def _same_track(self, desc: dict, geom: BaseGeometry, now: float) -> str | None:
         """The live track this sighting most likely repeats: compatible description, and close enough given how far
@@ -329,6 +371,8 @@ class Tracker:
                 event = self.get(line.pop("id"))
                 if event:
                     event.update(line)
+                    if line.get("rejected"):
+                        self._withdraw(event)
             elif kind == "event" and "id" in line:
                 line["id"] = len(self.events) + 1
                 self.events.append(line)

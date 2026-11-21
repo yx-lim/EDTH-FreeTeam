@@ -86,7 +86,9 @@ friendly unit. "200 metres north of me" is measured from the reporter's latest p
 
 The frame shape, not only the colour, carries the side, so it still reads in night mode and for colour-blind users.
 A single report is dashed until the duty officer confirms it; contacts then fade by type (a drone after 3 minutes,
-vehicles and troops after 15, an IED after a day). The **Contacts** button hides or shows them.
+vehicles and troops after 15). Static hazards (IEDs, mines, cables) never vanish: they stay dashed as
+"unconfirmed, N h old". The **To confirm** panel lists every draft; **C** confirms and **X** rejects the top card.
+The **Contacts** button hides or shows them.
 
 ## Ukrainian and Russian
 
@@ -143,7 +145,7 @@ is silent. The event log (`data/events.jsonl`) is replayed on restart.
 | `backend/stt.py` | Speech-to-text: Voxtral with place-name vocabulary (`context_bias`) or local faster-whisper |
 | `backend/net.py` | Radio-net mode: split at "over"; speaker, addressee and kind (report, request, order, ack, say again, radio check); acks, repeats, taskings |
 | `backend/vad.py`, `frontend/src/vad.js` | Energy voice-activity detection that cuts a channel into transmissions (server for recordings, browser live) |
-| `backend/app.py` | FastAPI: `POST /report`, `POST /audio`, `POST /net/text`, `POST /net/audio`, `POST /net/recording`, `POST /net/replay`, `GET /state`, `POST /places`, `GET /export.geojson`, `POST /reset`, `WS /ws` |
+| `backend/app.py` | FastAPI: `POST /report`, `POST /audio`, `POST /net/text`, `POST /net/audio`, `POST /net/recording`, `POST /net/replay`, `GET /state`, `POST /places`, `POST /events/{id}/confirm`, `POST /events/{id}/reject`, `GET /picture.nvg`, `GET /picture.geojson`, `GET /export.geojson`, `POST /reset`, `WS /ws` |
 | `data/aliases.json` | Spoken names to OSM names; also sent to speech-to-text as vocabulary |
 | `data/demo_net.jsonl`, `scripts/make_demo_net.py` | Scripted demo net, and a synthetic radio recording of it |
 | `scripts/fetch_district.py` | Rebuild `data/gazetteer.json` for any bounding box |
@@ -192,14 +194,25 @@ What this repo can do now, grouped by area. Updated after each major implementat
 - Drone slang (ждун, мопед, пташка), counts ("два мавіки"), headings, "ще один" (= a new drone), and relayed reports.
 - The same thing seen twice is merged into one marker instead of two.
 - Units nearby are warned ("FPV at your position").
-- Markers fade by type: a drone after 3 min, vehicles and troops after 15 min, an IED after a day.
+- Markers fade by type: a drone after 3 min, vehicles and troops after 15 min.
+- Static hazards (IEDs, mines, cables, drones waiting on the ground) never vanish: past their fresh window they stay
+  dashed as "unconfirmed, N h old".
+- A moving contact shows an arrow for its heading.
 
 ### 4. Positions and grids
 - Grid references read out loud ("three one uniform…") place a report directly, for own units and contacts.
 - Military map look: NATO symbols, MGRS grid overlay, dark, satellite and topo base maps.
 - A confirm step before an unconfirmed report goes on the map.
 
-### 5. For the team app (Sarthak's repo)
+### 5. Duty-officer queue and export
+- A **To confirm** panel lists every draft: single enemy sightings first, then other sightings, then doubtful unit
+  fixes (place uncertain, callsign assumed). Each card shows the symbol, place, grid, reporter and age.
+- **C** confirms and **X** rejects the top card. A rejected report leaves the map (the unit falls back to its previous
+  fix) but stays in the log, marked "rejected by the duty officer".
+- **Export NVG** (NATO Vector Graphics) and **GeoJSON** give the current picture with APP-6 symbol codes and MGRS.
+  Only confirmed items leave by default (`?drafts=true` adds drafts), so a guess never looks like a fact.
+
+### 6. For the team app (Sarthak's repo)
 - `integrations/` holds a patch that adds spoken grid references to the React/Gemini app. **Sarthak needs to apply it.**
 
 ## Not done yet
@@ -210,17 +223,15 @@ What this repo can do now, grouped by area. Updated after each major implementat
   gpt-4o-transcribe on degraded recordings and score callsigns, places and numbers. (Skip Voxtral: no Ukrainian.)
 
 **Make the map more honest**
-- Mines, cables and waiting drones should turn "unconfirmed" instead of disappearing.
 - A misheard place should show two candidate places for the officer to pick.
 - Measure "truth was inside the circle X of 20" for the pitch slide.
 
 **Next features (by value)**
-1. Duty-officer confirm queue: radio call → pre-filled card → one key → map and NATO export.
-2. Name landmarks by voice ("позначка: спалений танк") and load a daily code table.
-3. Casualty card from 200/300 reports.
-4. Friendly drone corridors, so infantry don't jam or shoot our own drones.
-5. Reported threats along a route ("last report 5 min ago", never called safe).
-6. Read a Lore-style log and build the map from it.
+1. Name landmarks by voice ("позначка: спалений танк") and load a daily code table.
+2. Casualty card from 200/300 reports.
+3. Friendly drone corridors, so infantry don't jam or shoot our own drones.
+4. Reported threats along a route ("last report 5 min ago", never called safe).
+5. Read a Lore-style log and build the map from it.
 
 **Later**: streaming speech-to-text, offline map tiles, ATAK export, "in front of" by building entrance.
 

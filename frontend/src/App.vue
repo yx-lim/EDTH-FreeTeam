@@ -26,6 +26,11 @@ const WHAT = { infantry: ['GPUCI', 'infantry'], sniper: ['GPUCIS', 'sniper'], ta
 // How long a sighting stays on the map: a drone has moved on within minutes, an IED stays where it is.
 const CONTACT_TTL_S = { drone: 180, helicopter: 300, aircraft: 120, artillery: 600, sniper: 1800, ied: 86400, civilians: 1800 }
 const contactTtl = (c) => c?.ttl_s || CONTACT_TTL_S[c?.what] || 900
+// Static hazards (mines, IEDs, cables, drones waiting on the ground) never vanish: nobody radios "mine cleared".
+// Past their fresh window they stay, dashed, as "unconfirmed, N h old". Same rule as backend/contact.py persistent().
+const persistent = (c) => c?.what === 'ied' || (c?.ttl_s || 0) >= 1800
+const age = (t) => { const s = Math.max(0, now.value - t); return s < 3600 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} days` }
+const HEADING_DEG = { north: 0, northeast: 45, east: 90, southeast: 135, south: 180, southwest: 225, west: 270, northwest: 315 }
 const sideOf = (c) => SIDE[c?.side] || SIDE.unknown
 const sidc = (c, doubt) => {
   const f = (WHAT[c?.what] || WHAT.unknown)[0]
@@ -116,12 +121,13 @@ const contactsOnMap = computed(() => {
     latest.set(e.callsign, e)
     if (e.confirmed) confirmed.add(e.callsign)
   })
-  return [...latest.values()].filter((e) => !live.value || now.value - e.t <= contactTtl(e.contact))
-    .map((e) => ({ ...e, trackConfirmed: confirmed.has(e.callsign) }))
+  return [...latest.values()].filter((e) => !live.value || now.value - e.t <= contactTtl(e.contact) || persistent(e.contact))
+    .map((e) => ({ ...e, trackConfirmed: confirmed.has(e.callsign),
+      expired: live.value && now.value - e.t > contactTtl(e.contact) }))
 })
 // A single report is a draft (dashed) until the duty officer confirms it or a second station reports the same thing;
 // an ageing one is in doubt again.
-const contactDoubt = (e) => !(e.trackConfirmed || e.confirmed || e.corroborated)
+const contactDoubt = (e) => !(e.trackConfirmed || e.confirmed || e.corroborated) || e.expired
   || (live.value && now.value - e.t > contactTtl(e.contact) / 2)
 const WARN_M = 300   // backend/contact.py WARN_M
 const metres = ([lon1, lat1], [lon2, lat2]) => Math.hypot((lon2 - lon1) * 111320 * Math.cos((lat1 * Math.PI) / 180), (lat2 - lat1) * 110540)
@@ -164,6 +170,24 @@ const suspected = (e) => ((e.ambiguous || e.callsign_assumed) && !e.confirmed) |
 async function confirm(e) {
   await fetch(`/api/events/${e.id}/confirm`, { method: 'POST' })   // the update comes back over the WebSocket
 }
+async function reject(e) {
+  await fetch(`/api/events/${e.id}/reject`, { method: 'POST' })
+}
+
+// Duty-officer queue: everything that needs a decision, most urgent first. Enemy sightings, then other sightings,
+// then doubtful unit fixes; newest first within each. C confirms and X rejects the top card.
+const drafts = computed(() => {
+  if (!live.value) return []
+  const latest = new Map()
+  visible.value.forEach((e) => { if (e.ok && !e.superseded && !isContact(e)) latest.set(e.callsign, e) })
+  const units = [...latest.values()].filter((e) => (e.ambiguous || e.callsign_assumed) && !e.confirmed)
+  const seen = contactsOnMap.value.filter((e) => !(e.trackConfirmed || e.confirmed || e.corroborated))
+  const rank = (e) => (isContact(e) ? (e.contact?.side === 'hostile' ? 0 : 1) : 2)
+  return [...seen, ...units].sort((a, b) => rank(a) - rank(b) || b.t - a.t)
+})
+const draftSymbol = (e) => new ms.Symbol(isContact(e) ? sidc(e.contact, true) : SIDC.dashed, { size: 16 }).asSVG()
+const draftTitle = (e) => (isContact(e) ? `${e.callsign} · ${describeContact(e.contact)}` : `${e.callsign} position`)
+const draftWhy = (e) => (isContact(e) ? 'single report' : [e.ambiguous && 'place uncertain', e.callsign_assumed && 'callsign assumed'].filter(Boolean).join(', '))
 
 function render() {
   if (!map?.getSource('regions')) return
@@ -211,7 +235,8 @@ function render() {
   map.getSource('contacts').setData({ type: 'FeatureCollection', features: seen.map((e) => ({
     type: 'Feature', geometry: { type: 'Point', coordinates: e.centre },
     properties: { icon: `ms:${sidc(e.contact, contactDoubt(e))}`, colour: sideOf(e.contact).colour,
-      label: `${describeContact(e.contact)}\n${live.value ? ago(e.t) + ' · ' : ''}${e.seen_by?.length ? 'seen by ' + e.seen_by.join(', ') : 'reporter unknown'}` },
+      heading: HEADING_DEG[e.contact?.heading] ?? null,
+      label: `${describeContact(e.contact)}\n${e.expired ? `unconfirmed, ${age(e.t)} old · ` : live.value ? ago(e.t) + ' · ' : ''}${e.seen_by?.length ? 'seen by ' + e.seen_by.join(', ') : 'reporter unknown'}` },
   })) })
   map.getSource('custom').setData({ type: 'FeatureCollection', features: customPlaces.value.map((p) => ({
     type: 'Feature', geometry: { type: 'Point', coordinates: [p.lon, p.lat] }, properties: { label: p.name },
@@ -237,6 +262,18 @@ function applyBasemap() {
 }
 watch(basemap, applyBasemap)
 watch(showGrid, updateGrid)
+
+// An arrow pointing up (north) from just outside the symbol, drawn once in white and tinted per contact.
+function arrowImage() {
+  const size = 96, c = document.createElement('canvas')
+  c.width = c.height = size
+  const g = c.getContext('2d')
+  g.strokeStyle = g.fillStyle = '#ffffff'
+  g.lineWidth = 6
+  g.beginPath(); g.moveTo(size / 2, size / 2 - 22); g.lineTo(size / 2, 8); g.stroke()
+  g.beginPath(); g.moveTo(size / 2, 0); g.lineTo(size / 2 - 11, 18); g.lineTo(size / 2 + 11, 18); g.closePath(); g.fill()
+  return { width: size, height: size, data: new Uint8Array(g.getImageData(0, 0, size, size).data.buffer) }
+}
 
 // Milsymbol draws each APP-6 symbol the first time the map asks for it.
 function addSymbolImage(ev) {
@@ -470,7 +507,14 @@ function netFile(ev) { const f = ev.target.files?.[0]; ev.target.value = ''; if 
 
 // Hold the space bar to talk (unless typing).
 const typing = (e) => ['TEXTAREA', 'INPUT', 'SELECT'].includes(e.target.tagName)
-function keydown(e) { if (mode.value !== 'ptt') return; if (e.code === 'Space' && !e.repeat && !typing(e)) { e.preventDefault(); talk(true) } }
+function keydown(e) {
+  if (!typing(e) && !e.repeat && !e.metaKey && !e.ctrlKey && drafts.value.length) {   // queue keys, both modes
+    if (e.key === 'c' || e.key === 'C') { e.preventDefault(); confirm(drafts.value[0]); return }
+    if (e.key === 'x' || e.key === 'X') { e.preventDefault(); reject(drafts.value[0]); return }
+  }
+  if (mode.value !== 'ptt') return
+  if (e.code === 'Space' && !e.repeat && !typing(e)) { e.preventDefault(); talk(true) }
+}
 function keyup(e) { if (mode.value !== 'ptt') return; if (e.code === 'Space' && !typing(e)) { e.preventDefault(); talk(false) } }
 // Releasing Space in another window never reaches us: losing focus ends the press, or the microphone stays on.
 function blur() { talk(false) }
@@ -569,6 +613,13 @@ onMounted(async () => {
       paint: { 'text-color': ['get', 'colour'], 'text-halo-color': '#0b0d10', 'text-halo-width': 2 } })
     map.addLayer({ id: 'threat-ring', type: 'line', source: 'threat',
       paint: { 'line-color': SIDE.hostile.colour, 'line-width': 3, 'line-dasharray': [1, 1] } })
+    // Heading of a moving contact: an arrow pointing the way it was going. The circle does not grow with time:
+    // a drone covers kilometres in a minute, so a growing circle would swallow the map and say nothing.
+    map.addImage('heading-arrow', arrowImage(), { pixelRatio: 2, sdf: true })   // sdf: tintable with icon-color
+    map.addLayer({ id: 'contact-arrow', type: 'symbol', source: 'contacts', filter: ['!=', ['get', 'heading'], null],
+      layout: { 'icon-image': 'heading-arrow', 'icon-rotate': ['get', 'heading'], 'icon-rotation-alignment': 'map',
+        'icon-allow-overlap': true, 'icon-ignore-placement': true },
+      paint: { 'icon-color': ['get', 'colour'] } })
     // Sightings on top of everything: an enemy symbol must never hide under one of ours.
     map.addLayer({ id: 'contact-icon', type: 'symbol', source: 'contacts',
       layout: { 'icon-image': ['get', 'icon'], 'icon-allow-overlap': true, 'icon-ignore-placement': true } })
@@ -688,11 +739,31 @@ onUnmounted(() => {
         </div>
         <div class="row small">
           <label><input type="checkbox" v-model="readBack" /> read back</label>
-          <a href="/api/export.geojson" target="_blank">export GeoJSON</a>
+          <a href="/api/picture.nvg" title="Confirmed picture as NATO Vector Graphics (APP-6 symbols)">export NVG</a>
+          <a href="/api/picture.geojson" target="_blank" title="Confirmed picture as GeoJSON with SIDC and MGRS">GeoJSON</a>
           <span class="hint">right-click map: name a point</span>
         </div>
         <div v-if="heard" class="heard">{{ heard }}</div>
       </form>
+
+      <section v-if="drafts.length" class="queue" aria-label="Drafts to confirm">
+        <h2>To confirm <span class="count">{{ drafts.length }}</span> <span class="keys">C confirm · X reject (top card)</span></h2>
+        <ol>
+          <li v-for="(d, i) in drafts.slice(0, 5)" :key="d.id" :class="{ top: i === 0 }">
+            <i class="sym" v-html="draftSymbol(d)"></i>
+            <div class="what">
+              <b :style="{ color: isContact(d) ? sideOf(d.contact).colour : colour(d.callsign) }">{{ draftTitle(d) }}</b>
+              <div class="where">{{ (d.parsed?.relation || '').replaceAll('_', ' ') }} {{ d.anchor }} ±{{ Math.round(d.radius_m) }} m ·
+                <span class="gridref">{{ mgrsAt(d.centre, { radius: d.radius_m }) }}</span></div>
+              <div class="who">{{ d.seen_by?.length ? 'seen by ' + d.seen_by.join(', ') : d.speaker || 'reporter unknown' }} ·
+                {{ ago(d.t) }} · {{ draftWhy(d) }}</div>
+            </div>
+            <button type="button" class="confirm small" @click="confirm(d)">Confirm</button>
+            <button type="button" class="quiet small" @click="reject(d)">Reject</button>
+          </li>
+        </ol>
+        <div v-if="drafts.length > 5" class="more">+{{ drafts.length - 5 }} more</div>
+      </section>
 
       <label class="scrub">History {{ cursor }} / {{ events.length }}
         <input type="range" min="0" :max="events.length" v-model.number="cursor" />
@@ -750,7 +821,8 @@ onUnmounted(() => {
             ⚠ {{ w.callsign }}: {{ describeContact({ ...w.contact, activity: null }) }} {{ w.distance_m ? `${w.distance_m} m ${w.direction}` : 'at position' }}</div>
           <div v-if="e.ok" class="read">→ {{ (e.parsed?.relation || '').replaceAll('_', ' ') }} <b>{{ e.anchor }}</b> · ±{{ e.radius_m }} m
             <span class="gridref">{{ mgrsAt(e.centre, { radius: e.radius_m }) }}</span></div>
-          <div v-if="e.superseded" class="note">corrected by a later report</div>
+          <div v-if="e.rejected" class="note">rejected by the duty officer</div>
+          <div v-else-if="e.superseded" class="note">corrected by a later report</div>
           <div v-if="e.identified_as" class="tick">✓ identified as {{ e.identified_as }}</div>
           <div v-else-if="e.note" class="note">{{ e.note }}</div>
           <div v-if="e.identifies" class="assumed">callsign given after “say again”</div>
@@ -789,6 +861,17 @@ body { margin: 0; font: 14px/1.4 system-ui, sans-serif; color: var(--text); back
 .legend .sym { display: inline-flex; width: 16px; justify-content: center; flex: none; }
 .contact { font-weight: 600; }
 .warn { color: #f87171; font-weight: 700; }
+.queue { border: 1px solid var(--accent); border-radius: 8px; padding: 8px 10px; background: #15130a; }
+.queue h2 { font-size: 12px; margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.06em; display: flex; gap: 8px; align-items: baseline; }
+.queue h2 .count { background: var(--accent); color: #111; border-radius: 9px; padding: 0 7px; }
+.queue h2 .keys { margin-left: auto; color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
+.queue ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.queue li { display: flex; gap: 8px; align-items: center; padding: 6px; border-radius: 6px; border: 1px solid var(--line); }
+.queue li.top { border-color: var(--accent); }
+.queue .what { flex: 1; min-width: 0; font-size: 12px; }
+.queue .where, .queue .who, .queue .more { color: var(--muted); font-size: 11px; }
+.queue .sym { flex: none; display: inline-flex; width: 22px; justify-content: center; }
+button.small { padding: 2px 8px; font-size: 12px; }
 .legend .frame.dashed { border: 1.5px dashed #000; outline: 1px solid #80e0ff; background: transparent; }
 .maplibregl-ctrl-attrib { background: rgba(11, 13, 16, 0.7) !important; color: var(--muted); }
 .maplibregl-ctrl-attrib a { color: var(--muted) !important; }
