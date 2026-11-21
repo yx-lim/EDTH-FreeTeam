@@ -43,13 +43,14 @@ PROWORDS = ["Zero", "Alpha", "Bravo", "Charlie", "Delta", "Echo", "this is", "ov
 
 _ST = rf"(?:all stations|toutes (?:les )?stations|{_CS})"
 # Atomic groups below keep "Bravo one is ..." from backtracking to a bare "Bravo" that would pass this check.
-_NOT_HEADER = r"(?!\s+(?:is|est|and|et|reports?|reported|says|said|confirms|signale|indique|rapporte)\b)"
-_RELAY = (rf"\b(?P<cs>{_CS})\s+(?:reports|reported|says|said|confirms|signale|indique|rapporte)\s+(?:(?:that|que|qu)\s+)?"
+_NOT_HEADER = r"(?!\s+(?:is|est|and|et|reports?|reported|says|said|confirms|signale|indique|rapporte|dit|annonce)\b)"
+_RELAY = (rf"\b(?P<cs>{_CS})\s+(?:reports|reported|says|said|confirms|signale|indique|rapporte|dit|annonce)\s+(?:(?:that|que|qu)\s+)?"
           r"(?:(?:he|she|they|it|il|elle|ils)\s+(?:is|are|s|re|est|sont)\s+)?")
 _SAY_AGAIN = (r"\b(?:say again|repeat (?:your )?last|repeat that|please repeat|repetez|unreadable|garbled|"
               r"didn t (?:copy|get) that|did not copy|you re breaking up|breaking up)\b")
 _CHECK = (r"\b(?:radio check|how (?:do you )?(?:read|copy)(?: me)?|loud and clear|lima charlie|five by five|5 by 5|"
-          r"weak but readable|je vous recois|comment me recevez vous|5 sur 5|cinq sur cinq)\b")
+          r"weak but readable|je vous recois|comment me recevez vous|5 sur 5|cinq sur cinq|essai radio|verification radio|"
+          r"fort et clair|je vous entends|recu fort)\b")
 _REQUEST = (r"\b(?:send (?:me |us )?(?:your )?(?:position|location|loc|pos|grid|status)|"
             r"(?:what s|what is|confirm|state|give|report) (?:me |us )?your (?:position|location|loc|pos)|"
             r"report (?:position|location)|where are you|position check|"
@@ -59,9 +60,11 @@ _ORDER = (r"^(?:(?:please|now|immediately|then|et)\s+)*(?:move to|go to|proceed 
           r"rv at|meet at|rejoignez|rejoins|allez (?:a|au|aux|vers|jusqu a)|dirigez vous vers|"
           r"deplacez vous (?:vers|a|au|aux|jusqu a)|rendez vous (?:a|au|aux))\s+(?P<a>.+)")
 _HOLD = (r"^(?:(?:please|now)\s+)*(?:hold (?:your )?position|hold there|stay where you are|stay put|remain in place|"
-         r"restez (?:sur place|en position|ou vous etes)|ne bougez (?:pas|plus))\b")
+         r"restez (?:sur place|en position|sur position|sur votre position|ou vous etes)|tenez (?:la |votre )?position|"
+         r"ne bougez (?:pas|plus))\b")
 _ACK = (r"(?:roger(?: that)?|copy(?: that)?|copied|wilco|received|understood|acknowledged|ack|affirmative|affirm|noted|"
-        r"send|go ahead|ready to copy|recu|bien recu|compris|bien compris|parlez|allez y|thanks|thank you|merci|good)")
+        r"send|go ahead|ready to copy|recu|bien recu|compris|bien compris|parlez|allez y|thanks|thank you|merci|good|"
+        r"j execute|j y vais|affirmatif|entendu|c est note)")
 _END = re.compile(r"\b(?:over and out|over|out|à vous|a vous|terminé|termine|прийом|приём|прием|кінець зв.язку|конец связи"
                   r"|відбій|отбой)(?!\w)(?P<p>[.!,;]*)\s+", re.I)
 

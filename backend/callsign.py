@@ -66,7 +66,10 @@ NEVER = {"the", "this", "that", "there", "is", "and", "over", "out", "roger", "c
          "east", "west", "hello", "radio", "check", "all", "stations", "go", "ahead", "send", "received", "affirm",
          "negative", "correction", "position", "holding", "same", "behind", "front", "between", "towards", "along",
          "mile", "miles", "like", "make", "made", "mice", "lime", "line", "time", "home", "hotels", "goal", "gold",
-         "told", "bravely", "brave", "delay", "echoes", "tank", "tanks", "drone", "drones", "theatre", "theater"}
+         "told", "bravely", "brave", "delay", "echoes", "tank", "tanks", "drone", "drones", "theatre", "theater",
+         # French radio words: "ici Zéro" must not become "Mike 0"
+         "ici", "de", "du", "des", "la", "le", "les", "sur", "au", "aux", "et", "je", "suis", "nous", "vous", "pres",
+         "vers", "entre", "rue", "place", "pont", "recu", "allo", "zero", "toutes", "stations", "terminé", "termine"}
 _END = r"(?=\s*(?:$|[,.;:!?]|\bthis is\b|\bover\b|\bout\b|\bthis\b))"
 
 

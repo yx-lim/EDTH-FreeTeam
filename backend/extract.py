@@ -370,6 +370,7 @@ _PATTERNS = [
     (rf"\b(?:vers|en direction\s+(?:de|du|des))\s+(?P<a>.+)", "towards"),
     (r"\b(?:moving|heading|going|moved|walking)\s+(?:along|down|up)\s+(?P<a>.+)", "along"),
     (r"\ble long (?:de|du|des)\s+(?P<a>.+)", "along"),
+    (r"\b(?:je |nous |on )?(?:longe|longeons|longent|longer)\s+(?:la |le |les |l )?(?P<a>.+)", "along"),
     (r"\b(?:behind|derriere)\s+(?P<a>.+)", "behind"),
     (r"\b(?:over|above|overhead|au dessus (?:de|du|des))\s+(?P<a>.+)", "at"),   # an aircraft or drone above a place
     (r"\b(?:in front of|devant)\s+(?P<a>.+)", "in_front_of"),
@@ -387,7 +388,31 @@ _FILLERS = r"\b(?:uh|um|er|erm|euh|ah|hmm|out|terminé|termine|a vous|i say agai
 _STREET = re.compile(r"(?:rue|boulevard|bd|avenue|av|quai|place|allee|impasse|passage|cour|carrefour|street|road)\b")
 
 
+_FR_DIGITS = {"zero": "0", "un": "1", "une": "1", "deux": "2", "trois": "3", "quatre": "4", "cinq": "5", "six": "6",
+              "sept": "7", "huit": "8", "neuf": "9", "trente et un": "31", "trente et une": "31"}
+_FR_COMPASS = {"nord nord est": "north northeast", "est nord est": "east northeast", "est sud est": "east southeast",
+               "sud sud est": "south southeast", "sud sud ouest": "south southwest", "ouest sud ouest": "west southwest",
+               "ouest nord ouest": "west northwest", "nord nord ouest": "north northwest"}
+
+
+def _french(t: str) -> str:
+    """French radio wording onto the forms the patterns know (t is lower case, accents stripped)."""
+    t = re.sub(r"\b(?:carroyage|coordonnees?|quadrillage|grille|reference)\b", "grid", t)
+
+    def digits(m: re.Match) -> str:   # "grid cinq un deux un un zero" -> "grid 5 1 2 1 1 0"
+        words = m["g"]
+        for w, d in sorted(_FR_DIGITS.items(), key=lambda kv: -len(kv[0])):
+            words = re.sub(rf"\b{w}\b", d, words)
+        return "grid " + "".join(words.split()).upper() + " "   # "31 u d q 5 1 2 ..." -> "31UDQ512..."
+    t = re.sub(r"\bgrid (?P<g>(?:(?:zero|un|une|deux|trois|quatre|cinq|six|sept|huit|neuf|trente et une?|[a-z]|\d+)\b\s*){4,})",
+               digits, t)
+    for fr, en in _FR_COMPASS.items():
+        t = re.sub(rf"\b(?:au |a l )?{fr}\b(?:\s+(?:de|du|des))?", f"{en} of", t)
+    return t
+
+
 def _prep(text: str) -> str:
+    text = re.sub(r"\bà\s+(?=[A-ZÉÈÀ])", "at ", text)   # "à Mabillon" (but "à la", "à l'", "à 300 mètres" stay French)
     t = unicodedata.normalize("NFKD", text.lower())
     t = "".join(c for c in t if not unicodedata.combining(c))
     t = re.sub(r"['’`\-–—]", " ", t)
@@ -397,6 +422,8 @@ def _prep(text: str) -> str:
     t = re.sub(r"\bover and out\b", " ", t)
     t = re.sub(rf"\bover\b(?=\s*(?:$|[,.;]|out\b|over\b|(?:this is\s+)?{_CS}\b))", " ", t)
     t = re.sub(_FILLERS, " ", t)
+    t = re.sub(r"\b(?:on teste|testing|test(?:ing)? (?:un )?deux)\b", " ", t)   # chatter, not a place called "teste"
+    t = _french(t)
     return re.sub(r"\s+", " ", t).strip(" ,.;")
 
 
@@ -476,7 +503,7 @@ def _distances(clause: str) -> tuple[str, dict]:
             info["vague"] = True
         return f"{round(a * f)} m"
 
-    rng = rf"(?:between\s+)?(?P<n>{_NUM})\s*(?:to|or|and|-|a)\s*(?P<n2>{_NUM})"
+    rng = rf"(?:between\s+|entre\s+)?(?P<n>{_NUM})\s*(?:to|or|and|et|ou|-|a)\s*(?P<n2>{_NUM})"
     c = re.sub(rf"(?P<approx>{_APPROX}\s+)?(?:{rng})\s*(?P<u>{_UNIT_ANY})\b", to_m, c)
     c = re.sub(rf"(?P<approx>{_APPROX}\s+)?(?P<n>{_NUM}|a|an|one|two|three)\s*(?P<n2>)(?P<u>{_UNIT_ANY})\b", to_m, c)
     return re.sub(r"\s+", " ", c).strip(), info
@@ -527,12 +554,17 @@ def _parse_clause_normalised(clause: str) -> dict | None:
         return out
     if re.search(_HOLDING, clause):
         return {**_other(), "type": "holding", "confidence": 0.6}
+    # A street or square named with no preposition ("Golf quatre, rue de Rennes", "civils ... place Saint-Sulpice")
+    m = re.search(r"\b(?:rue|place|boulevard|bd|avenue|quai|square|carrefour|impasse|allee)\s+\S.*", clause)
+    if m and (a := _anchor(m.group(0))):
+        return {**_other(), "type": "position", "anchor": a, "relation": "at", "confidence": 0.4}
     return None
 
 
 # The clock method: "at my two o'clock, about a hundred metres". Twelve o'clock is the way the speaker faces, which
 # the net does not know, so only the distance is used: a ring around the reporter (as lang_uk.CLOCK does).
-_CLOCK = r"\b(?:at\s+)?(?:my|our|your)?\s*(?:\w+\s+)?o\s*clock\b"
+_CLOCK = (r"\b(?:at\s+)?(?:my|our|your)?\s*(?:\w+\s+)?o\s*clock\b"
+          r"|\ba\s+(?:mes|nos|vos)\s+(?:\w+\s+)?heures\b")   # French: "à mes deux heures"
 # Overhead / above us: the thing is where the reporter is ("drone overhead", "helicopter above us").
 _OVERHEAD = r"\b(?:overhead|above (?:us|me|my position|our position)|over (?:us|me|my position|our position)|au dessus de nous)\b"
 
@@ -594,6 +626,7 @@ def stub_extract(text: str) -> dict:
             t = f"at {t}"   # "at Odeon station, correction, Odeon theatre"
         del before
     t = re.sub(r"\b(?:i m |i am |we re |we are )?not (?:at|near|by|in|on) [^,.;]*", " ", t)
+    t = re.sub(r"\b(?:je ne suis |nous ne sommes )?pas (?:au|aux|a l|a la|a|en|dans|pres d\w*|rue|place|sur)\b[^,.;]*", " ", t)
 
     # "no enemy at the Odeon", "nothing seen", "enemy reported at the Pantheon yesterday": a place that is clear, or
     # somebody else's old news. Neither is a sighting and neither says where the speaker is: the phrase is dropped.

@@ -130,6 +130,7 @@ def location_clauses(clauses: list[str]) -> list[str]:
         c = re.sub(_MOVING + r"\s+" + _HEADING, " ", c)
         c = re.sub(_MOVING + r"\s+(?:towards?|to|vers)\s+.*", " ", c)   # a destination, not where it is now
         c = re.sub(r"\b(?:contact|spotted|sighted|observed|i see|we see|i can see|we can see|repere|on voit|je vois)\b", " ", c)
+        c = re.sub(_STATIC, " ", c)   # "à l'arrêt" / "stationary": how it is, not where
         c = re.sub(rf"\b(?:(?:is|are|was|has been|have been|est|sont) )?(?:now |completely |totally |partly )?(?:{_OBSTACLE})\b", " ", c)
         c = re.sub(r"\s+", " ", c).strip(" ,")
         if c:

@@ -340,7 +340,9 @@ class Gazetteer:
                 if (wanted and p.category != wanted) or p.minor:
                     continue
                 for pw in (p.words, p.latin_words):   # not OSM alternatives: too loose for fuzzy matching
-                    if pw and all(any(similar(t, w) for w in pw) for t in named) and any(has_word(pw, t) for t in named):
+                    # every word close, and one exact, or the category said matches too ("station Mabion")
+                    if pw and all(any(similar(t, w) for w in pw) for t in named) and (
+                            any(has_word(pw, t) for t in named) or (wanted and p.category == wanted)):
                         hits.append((4, p))
                         break
         if wanted and any(p.category == wanted for _, p in hits):
@@ -370,6 +372,8 @@ class Gazetteer:
             # drop words from the end until a place matches.
             toks = norm(name).split()
             for k in range(len(toks) - 1, 0, -1):
+                if all(CATEGORY_WORDS.get(t) or t in STOP for t in toks[:k]):
+                    break   # "tour banane" must not become "the tower": a bare category is not what was said
                 found = [p for p in self.find(" ".join(toks[:k]), near=near, kind=None, shrink=False) if not p.minor]
                 if found:
                     return found
