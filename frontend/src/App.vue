@@ -46,7 +46,7 @@ watch([basemap, showGrid, night], () => {
   try { localStorage.setItem('mapLook', JSON.stringify({ basemap: basemap.value, showGrid: showGrid.value, night: night.value })) } catch {}
 })
 const cursorGrid = ref('')     // MGRS under the mouse (or of the map centre on touch screens)
-let map, recogniser, recorder, stream, chunks, ticker
+let map, recogniser, press, recorder, stream, chunks, ticker
 
 // Radio-net mode: listen to the whole channel, no button, no callsign picker.
 const mode = ref('ptt')               // 'ptt' (push-to-talk) | 'net'
@@ -169,16 +169,17 @@ function add(event) {
   events.value.push(event)
   if (atEnd) cursor.value = events.value.length
   if (event.ok) map?.easeTo({ center: event.centre, duration: 600 })
-  speak(event)
 }
 
-// Read-back, radio style, so the speaker hears what the map understood.
+// Read-back, radio style, so the speaker hears what the map understood. Only the screen that sent the report speaks
+// (every open tab gets every event over the WebSocket, and several tabs reading back at once sounds like an echo).
 function speak(e) {
   if (!readBack.value || !window.speechSynthesis || e.source?.startsWith('radio')) return   // the net would hear itself
   let msg
   if (e.ok) msg = `${e.callsign}, ${e.parsed?.relation === 'at' ? 'at' : (e.parsed?.relation || '').replaceAll('_', ' ')} ${e.anchor}`
   else if (e.type === 'intent') msg = `${e.callsign}, copy intention.`
   else msg = `${e.callsign}, say again. ${e.note || ''}`
+  window.speechSynthesis.cancel()             // never queue up old read-backs behind the new one
   const u = new SpeechSynthesisUtterance(msg)
   u.lang = lang.value === 'fr' ? 'fr-FR' : 'en-GB'
   window.speechSynthesis.speak(u)
@@ -192,6 +193,7 @@ async function send(body = text.value.trim(), { voice = false } = {}) {
     body: JSON.stringify({ text: body, callsign: callsign.value }),
   })  // events come back over the WebSocket, same as for every other client
   const out = await r.json().catch(() => ({}))
+  if (r.ok) out.events?.forEach(speak)
   if (r.ok && !out.events?.length) heard.value = `heard “${body}”: ignored, no callsign or place`
   else if (voice) heard.value = `heard: “${body}”`
 }
@@ -237,6 +239,7 @@ async function recordStop() {
     method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: wav })
   if (r.status === 501) { serverStt.value = null; heard.value = 'server speech-to-text off; using the browser'; return }
   const out = await r.json().catch(() => ({}))
+  if (r.ok) out.events?.forEach(speak)
   heard.value = !r.ok ? `speech-to-text failed: ${out.detail || r.status}`
     : out.transcript && !out.events?.length ? `heard “${out.transcript}”: ignored, no callsign or place`
     : `heard: “${out.transcript}”`
@@ -251,35 +254,49 @@ async function talk(start) {
   }
   // Browser recogniser: one press = one transmission = one report. Chrome fires onresult many times while it refines
   // its guess, so collect only final pieces while the button is held and send the whole thing once, on release.
+  // Chrome also ends a session by itself (a few seconds of silence, network hiccups) while the key is still held: then
+  // keep what was heard and start a new session, so the press only ends when the key or button is released.
   if (start) {
     recogniser?.abort()                       // a late event from an earlier press must not send again
-    const rec = new Speech(), finals = []
-    let interim = '', sent = false, failed = false
-    rec.lang = lang.value === 'fr' ? 'fr-FR' : 'en-GB'
-    rec.continuous = true                     // a pause mid-sentence must not end the transmission
-    rec.interimResults = true                 // live text only; never sent
-    rec.onresult = (r) => {
-      if (rec !== recogniser) return
-      interim = ''
-      for (let i = r.resultIndex; i < r.results.length; i++) {
-        if (r.results[i].isFinal) finals[i] = r.results[i][0].transcript.trim()
-        else interim += r.results[i][0].transcript
+    const p = { held: true, pieces: [], failed: false }
+    press = p
+    const session = () => {
+      const rec = new Speech(), finals = []
+      let interim = ''
+      rec.lang = lang.value === 'fr' ? 'fr-FR' : 'en-GB'
+      rec.continuous = true                   // a pause mid-sentence must not end the transmission
+      rec.interimResults = true               // live text; sent only if the key is released before it turns final
+      const text = () => [...p.pieces, ...finals.filter(Boolean), interim.trim()].filter(Boolean).join(' ').trim()
+      rec.onresult = (r) => {
+        if (rec !== recogniser) return
+        interim = ''
+        for (let i = r.resultIndex; i < r.results.length; i++) {
+          if (r.results[i].isFinal) finals[i] = r.results[i][0].transcript.trim()
+          else interim += r.results[i][0].transcript
+        }
+        heard.value = `hearing: “${text()}”`
       }
-      heard.value = `hearing: “${[...finals.filter(Boolean), interim.trim()].filter(Boolean).join(' ')}”`
+      rec.onerror = (e) => {
+        if (rec !== recogniser || e.error === 'aborted' || e.error === 'no-speech') return
+        p.failed = true
+        heard.value = `speech: ${e.error}`
+      }
+      rec.onend = () => {                     // after stop(), with every final result delivered
+        if (rec !== recogniser) return
+        const t = text()
+        if (p.held && !p.failed) { p.pieces = t ? [t] : []; session(); return }   // ended by Chrome, key still down
+        recogniser = null
+        press = null
+        listening.value = false
+        if (t) send(t, { voice: true })
+        else if (!p.failed) heard.value = 'heard nothing'   // keep an error from onerror on screen
+      }
+      recogniser = rec
+      rec.start()
     }
-    rec.onend = () => {                       // fires once after stop(), with every final result delivered
-      if (rec !== recogniser || sent) return
-      sent = true
-      recogniser = null
-      const t = [...finals.filter(Boolean), interim.trim()].filter(Boolean).join(' ').trim()
-      if (t) send(t, { voice: true })
-      else if (!failed) heard.value = 'heard nothing'   // keep an error from onerror on screen
-      listening.value = false
-    }
-    rec.onerror = (e) => { if (e.error !== 'aborted' && e.error !== 'no-speech') { failed = true; heard.value = `speech: ${e.error}` } }
-    recogniser = rec
-    rec.start()
+    session()
   } else {
+    if (press) press.held = false
     recogniser?.stop()                        // onend sends the transmission
   }
 }
