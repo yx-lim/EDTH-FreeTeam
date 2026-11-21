@@ -18,6 +18,9 @@ def test_ukrainian_demo_net_attribution():
         ("граніт", "вежа", "report"), ("вежа", "граніт", "ack"), ("граніт", "вежа", "report"),
         ("лис", "вежа", "report"), ("вежа", "лис", "order"), ("лис", "вежа", "ack"),
         ("лис", "вежа", "report"), ("граніт", "вежа", "report"),
+        # sightings (tests/test_contact_uk.py checks the tracks)
+        ("граніт", "вежа", "report"), ("вежа", "граніт", "ack"), ("сокіл", "вежа", "report"), ("вежа", "all stations", "report"),
+        ("граніт", "вежа", "report"), ("лис", "вежа", "report"), ("сокіл", "вежа", "report"), ("лис", "вежа", "report"),
     ]
     units = net.tracker.units()
     assert set(units) == {"сокіл", "граніт", "лис"}          # Вежа (control) is never plotted

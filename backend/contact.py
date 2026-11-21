@@ -152,6 +152,15 @@ def compatible(a: dict, b: dict) -> bool:
     """Could two descriptions be the same thing? Same type (or one unknown), and sides that do not contradict."""
     if a["what"] != b["what"] and "unknown" not in (a["what"], b["what"]):
         return False
+    # Two named types that differ are two things: a Shahed is not the recon quad seen a minute ago. A generic word
+    # ("drone", "пташка") can still be either.
+    generic = {None, "drone", "quadcopter", "vehicle", "infantry", "group of people", "fixed-wing drone"}
+    if a.get("detail") not in generic and b.get("detail") not in generic and a.get("detail") != b.get("detail"):
+        return False
+    # Flying east, then flying west half a minute later: two drones, not one that turned round.
+    opposite = {("north", "south"), ("east", "west"), ("northeast", "southwest"), ("northwest", "southeast")}
+    if tuple(sorted((a.get("heading") or "", b.get("heading") or ""))) in {tuple(sorted(p)) for p in opposite}:
+        return False
     sides = {a["side"], b["side"]} - {"unknown"}
     return len(sides) <= 1
 

@@ -19,6 +19,7 @@ from .geo import Gazetteer, norm
 from .resolver import bearing, resolve
 
 
+CONTROL_STATIONS = ("zero", "command", "control", "hq", "вежа", "башня", "tower", "база")   # relay, never witness
 HOLD_S = 120   # how long a report with no callsign waits for the station to say who it is
 
 
@@ -108,7 +109,10 @@ class Tracker:
             else:
                 seen_by = [reporter]
             event["seen_by"] = [s for s in seen_by if s]
-            event["corroborated"] = len(event["seen_by"]) >= 2   # two stations saw it: no longer one man's word
+            # Two stations saw it: no longer one man's word. A control station passing a report on is not a second pair
+            # of eyes, and neither is a station nobody identified.
+            witnesses = [s for s in event["seen_by"] if s not in ("unidentified", *CONTROL_STATIONS)]
+            event["corroborated"] = len(witnesses) >= 2
             self._track(event, geom)
             event["threats"] = self._threats_from(event["contact"], geom, now) if event["contact"]["side"] == "hostile" else []
         self.events.append(event)
@@ -124,6 +128,8 @@ class Tracker:
     def _same_track(self, desc: dict, geom: BaseGeometry, now: float) -> str | None:
         """The live track this sighting most likely repeats: compatible description, and close enough given how far
         that kind of thing could have moved since. None: a new contact."""
+        if desc.get("another"):   # "ще один ждун" / "another drone": a second one, never the same one again
+            return None
         best, best_d = None, None
         for cs, tr in self._live_tracks(now):
             if not contacts.compatible(tr["contact"], desc):

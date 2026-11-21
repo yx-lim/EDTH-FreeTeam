@@ -228,7 +228,9 @@ class Net:
         if speaker in CONTROL or speaker is None:
             # Control does not report its own position; an unknown speaker's own position cannot be plotted.
             # Reports that name their subject ("Bravo one is at the theatre") still count.
-            reports = [r for r in reports if r.get("subject") and r["subject"] not in CONTROL]
+            # Sightings count whoever passes them on: control relaying "ждун біля Сараю" to all stations is logged and
+            # joins the track (as a relay, not a second witness).
+            reports = [r for r in reports if r["type"] == "contact" or (r.get("subject") and r["subject"] not in CONTROL)]
             if not reports:
                 heard = next((r for r in parsed["reports"] if r.get("anchor")), None)
                 where = f" (heard: {heard['relation'].replace('_', ' ')} {heard['anchor']['name']})" if heard else ""

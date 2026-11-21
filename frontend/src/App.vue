@@ -34,7 +34,7 @@ const sidc = (c, doubt) => {
 // "2× enemy tank, moving north" / "vehicle (side unknown)"
 function describeContact(c, { spoken = false } = {}) {
   if (!c) return 'contact'
-  const what = (WHAT[c.what] || WHAT.unknown)[1]
+  const what = c.detail || (WHAT[c.what] || WHAT.unknown)[1]   // detail: "FPV waiting on the ground", "Shahed"
   const n = c.count > 1 ? (spoken ? `${c.count} ` : `${c.count}× `) : ''
   const side = sideOf(c).word ? `${sideOf(c).word} ` : ''
   const unknown = c.side === 'unknown' || !SIDE[c.side] ? (spoken ? ', side unknown' : ' (side unknown)') : ''

@@ -1,0 +1,79 @@
+spoken,lang,what,detail,ttl_s,side,status,notes
+пташка,uk,drone,drone,180,,sourced,generic word for any drone
+птичка,ru,drone,drone,180,,sourced,generic word for any drone
+птаха,uk,drone,drone,180,,check,variant of пташка
+дрон,uk,drone,drone,180,,sourced,
+коптер,uk,drone,quadcopter,180,,check,
+мопед,uk,drone,Shahed,120,hostile,sourced,named for its engine sound; Russian-only system
+шахед,uk,drone,Shahed,120,hostile,sourced,
+шахід,uk,drone,Shahed,120,hostile,check,
+герань,ru,drone,Shahed,120,hostile,sourced,Russian official name
+гербера,uk,drone,Gerbera decoy,120,hostile,check,cheap Shahed decoy
+баба яга,uk,drone,heavy bomber drone,300,,sourced,large hexacopter bomber (used by Ukrainian units: side never assumed)
+вампір,uk,drone,heavy bomber drone,300,,sourced,
+вампир,ru,drone,heavy bomber drone,300,,sourced,
+фпв,uk,drone,FPV,90,,check,also spoken as фпвшка
+фпвшка,uk,drone,FPV,90,,check,
+фпвишка,ru,drone,FPV,90,,check,
+камікадзе,uk,drone,FPV,90,,check,
+камикадзе,ru,drone,FPV,90,,check,
+fpv,en,drone,FPV,90,,check,
+оптоволокно,uk,drone,fibre-optic FPV,90,,sourced,cannot be jammed; on the ground it is a cable instead
+на оптиці,uk,drone,fibre-optic FPV,90,,check,
+на оптике,ru,drone,fibre-optic FPV,90,,check,
+ждун,uk,drone,FPV waiting on the ground,1800,,check,lands and waits for a target; static
+мавік,uk,drone,Mavic recon quad,300,,check,brand name used generically
+мавик,ru,drone,Mavic recon quad,300,,check,
+орлан,uk,drone,Orlan recon wing,300,hostile,sourced,spots for artillery and Lancets; Russian-only system
+зала,uk,drone,ZALA recon wing,300,hostile,check,
+суперкам,uk,drone,Supercam recon wing,300,hostile,check,
+крило,uk,drone,fixed-wing drone,300,,check,generic word for any winged drone
+крыло,ru,drone,fixed-wing drone,300,,check,
+ланцет,uk,drone,Lancet loitering munition,120,hostile,sourced,
+молнія,uk,drone,Molniya attack wing,120,hostile,sourced,
+молния,ru,drone,Molniya attack wing,120,hostile,sourced,
+каб,uk,artillery,KAB glide bomb,60,hostile,check,not a drone but reported the same way
+кабель,uk,unknown,fibre-optic cable,21600,,check,may be booby-trapped; stays until cleared
+котушка,uk,unknown,fibre-optic cable,21600,,check,cable spool
+катушка,ru,unknown,fibre-optic cable,21600,,check,
+піхота,uk,infantry,infantry,900,,sourced,
+пехота,ru,infantry,infantry,900,,sourced,
+особовий склад,uk,infantry,infantry,900,,check,
+диверсанти,uk,infantry,infiltration group,900,,check,
+дрг,uk,infantry,infiltration group,900,,check,
+снайпер,uk,sniper,sniper,1800,,sourced,
+танк,uk,tank,tank,600,,sourced,
+бтр,uk,apc,APC,600,,sourced,
+бмп,uk,apc,IFV,600,,sourced,
+мтлб,uk,apc,MT-LB,600,,check,
+бронетехніка,uk,apc,armour,600,,check,
+бронетехника,ru,apc,armour,600,,check,
+техніка,uk,vehicle,vehicle,600,,sourced,
+техника,ru,vehicle,vehicle,600,,sourced,
+машина,uk,vehicle,vehicle,600,,check,
+вантажівка,uk,vehicle,truck,600,,check,
+грузовик,ru,vehicle,truck,600,,check,
+пікап,uk,vehicle,pickup,600,,check,
+спалена техніка,uk,vehicle,destroyed vehicle,86400,,check,a landmark more than a threat
+сгоревшая техника,ru,vehicle,destroyed vehicle,86400,,check,
+підбита техніка,uk,vehicle,destroyed vehicle,86400,,check,
+міна,uk,ied,mine,21600,,sourced,stays until cleared
+мина,ru,ied,mine,21600,,sourced,
+міни,uk,ied,mines,21600,,sourced,
+розтяжка,uk,ied,tripwire,21600,,sourced,
+фугас,uk,ied,IED,21600,,check,
+приліт,uk,artillery,impact,600,,sourced,
+прилет,ru,artillery,impact,600,,sourced,
+обстріл,uk,artillery,shelling,600,,sourced,
+обстрел,ru,artillery,shelling,600,,sourced,
+арта,uk,artillery,artillery,600,,check,
+міномет,uk,artillery,mortar,600,,sourced,
+миномет,ru,artillery,mortar,600,,sourced,
+вертоліт,uk,helicopter,helicopter,300,,sourced,
+вертолет,ru,helicopter,helicopter,300,,sourced,
+вертушка,uk,helicopter,helicopter,300,,check,
+літак,uk,aircraft,aircraft,120,,sourced,
+самолет,ru,aircraft,aircraft,120,,sourced,
+цивільні,uk,civilians,civilians,1800,,sourced,
+гражданские,ru,civilians,civilians,1800,,sourced,
+мирні,uk,civilians,civilians,1800,,check,

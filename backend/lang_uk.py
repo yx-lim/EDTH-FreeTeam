@@ -270,7 +270,12 @@ def header(text: str) -> tuple[str | None, str | None, str | None, str, str]:
             frm_i = j + 1
             name = words[frm_i][1]
             nxt = words[frm_i + 1][2] if frm_i + 1 < len(words) else ""
-            if (nxt.isdigit() and len(nxt) == 1) or (_UNITS.get(nxt, 99) < 10 and float(_UNITS[nxt]).is_integer()):
+            # "я Граніт два, ..." is callsign Граніт 2; "я Сокол, два мавика" is a count. The number belongs to the
+            # callsign only when it ends the call sign phrase (punctuation or end of text after it).
+            after = toks[words[frm_i + 1][0] + 1][1] if frm_i + 1 < len(words) and words[frm_i + 1][0] + 1 < len(toks) else ","
+            direct = frm_i + 1 < len(words) and words[frm_i + 1][0] == words[frm_i][0] + 1
+            if direct and after in ",.;!?" and ((nxt.isdigit() and len(nxt) == 1)
+                                                 or (_UNITS.get(nxt, 99) < 10 and float(_UNITS[nxt]).is_integer())):
                 name, frm_i = f"{name} {words[frm_i + 1][1]}", frm_i + 1
             before = [w for w in words[:j] if w[2] not in acks]
             to = station(before[-1][1]) if before and _is_station(before[-1][2]) else None
@@ -407,7 +412,16 @@ def stub_extract_uk(text: str) -> dict:
     marks = list(re.finditer(rf"\b{CORRECTION}\b", t))
     if marks:
         correction, t = True, t[marks[-1].end():]
-    t = re.sub(r"\bне\s+[^,.;]*", " ", t)   # "не озеро": what it is not
+    # A sighting ("ждун біля Сараю ...", "бачу трьох ...") runs from the clause that starts it to the end; what comes
+    # before it is the speaker's own position.
+    from . import contact_uk
+    clauses = [c.strip() for c in re.split(r"\s*[,.;!?]\s*", t) if c.strip()]
+    seen = next((i for i, c in enumerate(clauses) if contact_uk.starts_contact(c)), None)
+    sightings = []
+    if seen is not None:
+        sightings.append(contact_uk.report(", ".join(clauses[seen:]), speaker))
+        clauses = clauses[:seen]
+    t = re.sub(r"\bне\s+[^,.;]*", " ", ", ".join(clauses))   # "не озеро": what it is not
     intent = bool(re.search(rf"\b{INTENT}\b", t))
     reports = []
     for clause in filter(None, (c.strip() for c in re.split(r"\s*[,.;!?]\s*", t))):
@@ -423,6 +437,7 @@ def stub_extract_uk(text: str) -> dict:
             r["type"] = "correction"
         reports.append(r)
         break   # one location per transmission in the demo grammar; the model handles more
+    reports = sightings + reports
     if not reports:
         reports = [{"subject": None, "type": "other", "anchor": None, "anchor2": None, "relation": "at",
                     "distance_m": None, "minutes_ago": None, "confidence": 0.0}]
