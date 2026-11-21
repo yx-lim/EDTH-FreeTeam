@@ -16,9 +16,9 @@ from shapely.geometry import LineString, Point, mapping, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import substring, unary_union
 
-from . import lang_uk
+from . import lang_uk, zone
 
-DATA = Path(__file__).resolve().parent.parent / "data"
+DATA = zone.DIR                          # data/ for Paris, data/zones/<name>/ for another zone (backend/zone.py)
 GAZETTEER = DATA / "gazetteer.json"
 ALIASES = DATA / "aliases.json"          # hand-written spoken names -> OSM names
 CUSTOM = DATA / "custom_places.json"     # operator-named points ("checkpoint 3"), added at runtime
@@ -52,7 +52,8 @@ MINOR = {"cafe", "restaurant", "bar", "hotel", "bookshop", "statue", "bakery", "
 # Words that carry no identity in a place name.
 STOP = {"the", "la", "le", "l", "les", "de", "du", "des", "d", "of", "a", "au", "aux"}
 # Spoken variants folded onto the form OSM uses.
-FOLD = {"st": "saint", "ste": "sainte", "san": "saint", "sant": "saint", "santa": "sainte",
+FOLD = {"vulytsia": "rue", "vul": "rue", "ulitsa": "rue", "ulytsia": "rue", "ulica": "rue",
+        "st": "saint", "ste": "sainte", "san": "saint", "sant": "saint", "santa": "sainte",
         "palace": "palais", "street": "rue", "senate": "senat"}
 
 
@@ -62,15 +63,34 @@ def norm(text: str) -> str:
     return " ".join(re.sub(r"[^\w\s]|_", " ", text).split())   # dashes, en dashes, apostrophes -> spaces
 
 
+# Cyrillic filler words in names: "Парк ім. Правика" is said "парк Правика"; "і"/"та"/"и" join two names.
+STOP_CYR = {"им", "имени", "та", "и"}
+
+
 def words(text: str) -> list[str]:
-    return [FOLD.get(t, t) for t in norm(text).split() if t not in STOP]
+    out = []
+    for t in norm(text).split():
+        if lang_uk.has_cyrillic(t):
+            t = lang_uk.fold(t)
+            if t in STOP_CYR:
+                continue
+            t = lang_uk.STREET_WORDS.get(t, t)   # "улица", "ул", "вул" -> "вулиця"
+        elif t in STOP:
+            continue
+        out.append(FOLD.get(t, t))
+    return out
+
+
+def has_word(pw: list[str], t: str) -> bool:
+    """t is one of the words pw, allowing Ukrainian/Russian case endings ("Соборній" ~ "соборна")."""
+    return t in pw or (lang_uk.has_cyrillic(t) and any(lang_uk.same_word(t, w) for w in pw if lang_uk.has_cyrillic(w)))
 
 
 def skeleton(word: str) -> str:
     """What a word sounds like, roughly, for English and French names: its first letter and its consonants.
     "odin" / "odeon" -> "odn", "sulpis" / "sulpice" -> "slps", "luxemburg" / "luxembourg" -> "lksmbrk"."""
-    w = norm(word).replace(" ", "")
-    for a, b in (("ph", "f"), ("qu", "k"), ("ck", "k"), ("x", "ks"), ("w", "v"), ("z", "s"), ("y", "i"),
+    w = norm(lang_uk.latin(word) if lang_uk.has_cyrillic(word) else word).replace(" ", "")
+    for a, b in (("kh", "k"), ("ph", "f"), ("qu", "k"), ("ck", "k"), ("x", "ks"), ("w", "v"), ("z", "s"), ("y", "i"),
                  ("gn", "n"), ("th", "t"), ("g", "k")):
         w = w.replace(a, b)
     w = re.sub(r"c(?=[eiy])", "s", w).replace("c", "k")
@@ -120,7 +140,12 @@ class Place:
 
     def __post_init__(self):
         self.words = self.words or words(self.name)
-        self.alt_words = [words(a) for a in self.aliases if not lang_uk.has_cyrillic(a)]
+        # Other names (OSM alternatives, Ukrainian/Russian names), and a Cyrillic name in Latin letters so an
+        # English report can say "Shevchenka street" in Irpin.
+        self.alt_words = [words(a) for a in self.aliases]
+        self.latin_words = words(lang_uk.latin(self.name)) if lang_uk.has_cyrillic(self.name) else []
+        if self.latin_words:
+            self.alt_words.append(self.latin_words)
 
     @property
     def minor(self) -> bool:
@@ -201,8 +226,8 @@ class Gazetteer:
         alias table and operator points with their aliases, never the open list of OSM names."""
         if self._cyr is None:
             names = {k: v for k, v in self._spoken.items() if lang_uk.has_cyrillic(k)}
-            for p in self.places:   # codenames, and landmarks with a Ukrainian or Russian name in OSM ("Шатле")
-                if p.category == "custom" or not p.minor:
+            for p in self.places:   # codenames and operator points; OSM names go through find()'s ranking
+                if p.category == "custom":
                     names.update({n: p.name for n in [p.name, *p.aliases] if lang_uk.has_cyrillic(n)})
             self._cyr = lang_uk.index_of(names)
         return self._cyr
@@ -219,22 +244,27 @@ class Gazetteer:
         return out[:limit]
 
     # --- lookup ------------------------------------------------------------------------------
-    def find(self, name: str, near: BaseGeometry | None = None, kind: str | None = None, shrink: bool = True) -> list[Place]:
+    def find(self, name: str, near: BaseGeometry | None = None, kind: str | None = None, shrink: bool = True,
+             sound: bool = True) -> list[Place]:
         """Candidates for a spoken anchor, best first. Empty list means unknown: never guess."""
-        if lang_uk.has_cyrillic(name):
-            # OSM names here are Latin script, so a Cyrillic name must hit the closed set (codenames, aliases,
-            # operator points). No hit means unknown, never a fuzzy guess ("Романа" is not "Ромашка").
+        cyr = lang_uk.has_cyrillic(name)
+        if cyr:
+            # Codenames, the alias table and operator points first: inflected anywhere in the phrase ("100 метрів на
+            # схід від Сараю"). Otherwise the map's own names, ranked like any other (Ukrainian zones name places in
+            # Cyrillic; in Paris a Cyrillic name may be an OSM alternative such as "Шатле").
             hit = lang_uk.lookup(name, self._cyrillic_index())
-            if hit is None:
-                return []
-            name = hit
+            if hit is not None:
+                name, cyr = hit, lang_uk.has_cyrillic(hit)
         q_norm = " ".join(t for t in norm(name).split() if t not in ("the", "la", "le", "l", "les"))
         if q_norm in self.aliases:
             name = self.aliases[q_norm]
-        raw_tokens = [t for t in norm(name).split() if t not in STOP]
-        wanted = next((CATEGORY_WORDS[t] for t in raw_tokens if t in CATEGORY_WORDS), None)
-        named = [FOLD.get(t, t) for t in raw_tokens if t not in CATEGORY_WORDS]
         tokens = words(name)
+
+        def category(t: str) -> str | None:
+            return CATEGORY_WORDS.get(t) or (lang_uk.category_of(t) if lang_uk.has_cyrillic(t) else None)
+
+        wanted = next((c for t in tokens if (c := category(t))), None)
+        named = [t for t in tokens if not category(t)]
         pool = [p for p in self.places if kind in (None, "intersection", "unit", p.kind)] or self.places
 
         def score(p: Place) -> int:
@@ -243,12 +273,12 @@ class Gazetteer:
                 if pw == tokens:
                     if i == 0:
                         return 0
-                    best = min(best, 1)   # exact on an alias: behind a place actually called that ("Panthéon")
+                    best = min(best, 0.5)   # exact on an alias: behind a place actually called that ("Panthéon")
                     continue
                 # a bare category word ("the market") is matched by category below, not by any name containing it
-                if tokens and named and all(t in pw for t in tokens) and not (p.minor and wanted != p.category):
+                if tokens and named and all(has_word(pw, t) for t in tokens) and not (p.minor and wanted != p.category):
                     best = min(best, 1)
-                elif wanted and p.category == wanted and all(t in pw for t in named):
+                elif wanted and p.category == wanted and all(has_word(pw, t) for t in named):
                     best = min(best, 2 if named else 3)   # "saint sulpice church" beats a bare "the church"
             return best
 
@@ -259,14 +289,16 @@ class Gazetteer:
             for p in pool:
                 if (wanted and p.category != wanted) or p.minor:
                     continue
-                if all(any(similar(t, w) for w in p.words) for t in named) and any(t in p.words for t in named):
-                    hits.append((4, p))
+                for pw in (p.words, p.latin_words):   # not OSM alternatives: too loose for fuzzy matching
+                    if pw and all(any(similar(t, w) for w in pw) for t in named) and any(has_word(pw, t) for t in named):
+                        hits.append((4, p))
+                        break
         if wanted and any(p.category == wanted for _, p in hits):
             hits = [(s, p) for s, p in hits if p.category == wanted]
         if not hits:
             close = difflib.get_close_matches(norm(name), {p.key for p in pool if not p.minor}, n=3, cutoff=0.8)
             hits = [(5, p) for p in pool if p.key in close and not p.minor]
-        if not hits and shrink and named and any(len(t) >= 3 for t in named):   # whole phrase only
+        if not hits and shrink and sound and named and any(len(t) >= 3 for t in named):   # whole phrase only
             # Sound-alikes ("the Odin" for Odéon): every spoken word must sound like a word of the place. Landmarks
             # and streets only; the resolver marks the result for the duty officer to confirm.
             spoken = [t for t in named if len(t) >= 3]
@@ -276,7 +308,13 @@ class Gazetteer:
                 if all(any(sounds_like(t, w) for pw in (p.words, *p.alt_words) for w in pw) for t in spoken):
                     hits.append((6, p))
         if not hits and kind is not None:
-            return self.find(name, near=near, kind=None, shrink=shrink)   # the kind guess was wrong; retry
+            return self.find(name, near=near, kind=None, shrink=shrink, sound=sound)   # the kind guess was wrong
+        if not hits and cyr and shrink:
+            # A Cyrillic name for a Latin-script place ("Пантеон", "Одеон" in Paris): try it in Latin letters.
+            # Close spellings only: sound-matching a transliteration would be a guess on a guess ("Романа").
+            found = self.find(lang_uk.latin(name), near=near, kind=kind, shrink=True, sound=False)
+            if found:
+                return found
         if not hits and shrink:
             # Trailing context ("medici fountain in the luxembourg gardens", "town hall on place saint sulpice"):
             # drop words from the end until a place matches.
@@ -300,10 +338,16 @@ class Gazetteer:
 
     def by_sound(self, name: str, place: Place) -> bool:
         """True when `name` reached `place` only through a sound-alike match (worth a "did you mean" check)."""
-        spoken = [t for t in words(name) if t not in CATEGORY_WORDS and len(t) >= 3]
         names = [w for pw in (place.words, *place.alt_words) for w in pw]
-        return bool(spoken) and not all(any(similar(t, w) for w in names) for t in spoken) \
-            and place.key not in self.aliases.values() and norm(name) not in self.aliases
+        forms = [name] + ([lang_uk.latin(name)] if lang_uk.has_cyrillic(name) else [])
+        for form in forms:
+            spoken = [t for t in words(form) if t not in CATEGORY_WORDS and len(t) >= 3
+                      and not (lang_uk.has_cyrillic(t) and lang_uk.category_of(t))]
+            if not spoken or all(any(similar(t, w) or has_word([w], t) for w in names) for t in spoken):
+                return False
+        if lang_uk.has_cyrillic(name) and lang_uk.lookup(name, self._cyrillic_index()):
+            return False   # a codename or alias, said with a case ending
+        return place.key not in self.aliases.values() and norm(name) not in self.aliases
 
     # --- walking routes over the named-street network -------------------------------------------
     def _graph(self):

@@ -42,6 +42,12 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
+import sys
+
+# The zone must be chosen before backend modules load (backend/zone.py reads ZONE at import).
+if "--zone" in sys.argv:
+    os.environ["ZONE"] = sys.argv[sys.argv.index("--zone") + 1]
+
 from dotenv import load_dotenv
 from shapely.geometry import Point
 
@@ -152,12 +158,18 @@ async def main() -> None:
     ap.add_argument("--offline", action="store_true", help="use the rules extractor even if a Gemini or Mistral key is set")
     ap.add_argument("--all", action="store_true", help="list every turn (with --holdout: also reveals its failures)")
     ap.add_argument("--holdout", action="store_true", help="score the held-out set; failing turns stay hidden unless --all")
+    ap.add_argument("--zone", help="run on data/zones/<zone>/ and its stress_uk.jsonl / stress_uk_holdout.jsonl")
+    ap.add_argument("--pace", type=float, default=0.0,
+                    help="seconds between turns (Gemini free tier: 15 requests a minute, so about 4.5)")
     args = ap.parse_args()
     if args.offline:
         for k in ("MISTRAL_API_KEY", "GEMINI_API_KEY"):
             os.environ.pop(k, None)
 
     path = HOLDOUT if args.holdout else CASES
+    if args.zone:
+        from backend import zone as zone_mod
+        path = zone_mod.DIR / ("stress_uk_holdout.jsonl" if args.holdout else "stress_uk.jsonl")
     scenarios = load(path)
     categories = list(dict.fromkeys(row["category"] for turns in scenarios.values() for row in turns))
     gaz = Gazetteer()
@@ -167,12 +179,14 @@ async def main() -> None:
         tracker, event_ids = Tracker(gaz), {}
         for row in turns:
             first = (row["expect"]["callsigns"] or [None])[0]
-            events = await tracker.ingest(row["text"], now=row["t"])
+            parsed = await extract(row["text"])   # one model call per turn, shared by both systems
+            events = await tracker.ingest(row["text"], now=row["t"], parsed=parsed)
+            if args.pace:
+                await asyncio.sleep(args.pace)
             extractors.update(e.get("extractor") or "?" for e in events)
             for e in events:
                 if e["callsign"] == first or len(events) == 1:
                     event_ids[row["id"]] = e["id"]
-            parsed = await extract(row["text"])
             for system, out in (("current", current(events, tracker, first)), ("naive", naive(parsed, gaz))):
                 s = score(row, out, gaz, event_ids)
                 results[system][row["category"]].append(s)

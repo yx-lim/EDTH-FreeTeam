@@ -1,0 +1,10 @@
+{
+  "_note": "Demo mission codenames for the Irpin zone (invented, not real military positions). Codenames rotate daily: replace this file each morning.",
+  "codenames": [
+    {"name": "Ромашка", "aliases": [], "lat": 50.5252, "lon": 30.2468},
+    {"name": "Сарай", "aliases": [], "lat": 50.5141, "lon": 30.2419},
+    {"name": "Друга посадка", "aliases": ["Вторая посадка", "Другая посадка"], "lat": 50.5302, "lon": 30.2352},
+    {"name": "Орієнтир 3", "aliases": ["Ориентир 3"], "lat": 50.5226, "lon": 30.2540},
+    {"name": "Водокачка", "aliases": ["Водонапорная башня", "Водонапірна вежа"], "lat": 50.5109, "lon": 30.2492}
+  ]
+}

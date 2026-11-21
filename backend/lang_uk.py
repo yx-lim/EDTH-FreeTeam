@@ -14,8 +14,9 @@ import re
 import unicodedata
 from pathlib import Path
 
-DATA = Path(__file__).resolve().parent.parent / "data"
-CALLSIGNS = DATA / "callsigns.json"
+from . import zone  # noqa: E402
+
+CALLSIGNS = zone.path("callsigns.json", shared=True)   # the zone's own table, else data/callsigns.json
 
 _CYR = re.compile(r"[а-яёіїєґ]", re.I)
 _FOLD = str.maketrans({"і": "и", "ї": "и", "ы": "и", "є": "е", "э": "е", "ё": "е", "й": "и", "ґ": "г",
@@ -50,8 +51,14 @@ _UNITS = {
     "девяносто": 90, "сто": 100, "двисти": 200, "двести": 200, "триста": 300, "чотириста": 400,
     "четиреста": 400, "пятсот": 500, "пятьсот": 500, "шистсот": 600, "шестьсот": 600, "симсот": 700,
     "семьсот": 700, "висимсот": 800, "восемьсот": 800, "девятсот": 900, "девятьсот": 900,
-    "тисяча": 1000, "тисячу": 1000, "тысяча": 1000, "тысячу": 1000,
-    "полтораста": 150, "пивтораста": 150, "пивтори": 1.5, "полтора": 1.5,
+    "тисяча": 1000, "тисячу": 1000, "тысяча": 1000, "тысячу": 1000, "тисячі": 1000, "тисяч": 1000,
+    "тысячи": 1000, "тысяч": 1000, "сорок": 40, "сороку": 40, "сорока": 40,
+    # oblique cases, as in "від двохсот до трьохсот метрів" / "около двухсот метров"
+    "ста": 100, "двохсот": 200, "двухсот": 200, "трьохсот": 300, "трехсот": 300, "чотирьохсот": 400,
+    "четырехсот": 400, "п'ятисот": 500, "пятисот": 500, "шестисот": 600, "семисот": 700, "восьмисот": 800,
+    "п'ятдесяти": 50, "пятидесяти": 50, "двадцяти": 20, "двадцати": 20, "тридцяти": 30, "тридцати": 30,
+    "десяти": 10, "двох": 2, "двух": 2, "трьох": 3, "трех": 3, "чотирьох": 4, "четырех": 4, "п'яти": 5, "пяти": 5,
+    "полтораста": 150, "пивтораста": 150, "пивтори": 1.5, "полтора": 1.5, "півтора": 1.5,
 }
 _UNITS = {fold(k): v for k, v in _UNITS.items()}
 # Ordinal stems: "друга посадка", "второй посадкой", "третій орієнтир" all name the same numbered reference.
@@ -85,6 +92,62 @@ def _word_key(w: str) -> str:
 
 def key(text: str) -> list[str]:
     return [_word_key(w) for w in fold(text).split()]
+
+
+# --- place-name words ----------------------------------------------------------------------------------------------
+# Street words: Ukrainian and Russian forms and abbreviations fold to one ("улица", "ул", "вул" -> "вулиця"), so
+# "улица Шевченко" finds "вулиця Шевченка". Keys and values are folded.
+STREET_WORDS = {fold(k): fold(v) for k, v in {
+    "вулиця": "вулиця", "вул": "вулиця", "улица": "вулиця", "ул": "вулиця", "провулок": "провулок",
+    "пров": "провулок", "переулок": "провулок", "пер": "провулок", "площа": "площа", "пл": "площа",
+    "площадь": "площа", "проспект": "проспект", "просп": "проспект", "пр": "проспект", "бульвар": "бульвар",
+    "бульв": "бульвар", "б-р": "бульвар", "набережна": "набережна", "набережная": "набережна", "шосе": "шосе",
+    "шоссе": "шосе", "узвіз": "узвіз", "спуск": "узвіз", "тупик": "тупик", "проїзд": "проїзд", "проезд": "проїзд",
+    "сквер": "сквер", "парк": "парк", "міст": "міст", "мост": "міст"}.items()}
+# Generic words a speaker uses instead of a name, as stems matched with case endings ("біля церкви", "у школі").
+# The values are the gazetteer's categories. "Собор" is left out: it would swallow "Соборна вулиця".
+CATEGORY_STEMS = {fold(k): v for k, v in {
+    "церква": "church", "церковь": "church", "храм": "church", "каплиця": "church", "часовня": "church",
+    "парк": "park", "сквер": "park", "сад": "park", "школа": "school", "ліцей": "school", "лицей": "school",
+    "гімназія": "school", "гимназия": "school", "коледж": "school", "колледж": "school", "університет": "school",
+    "университет": "school", "лікарня": "hospital", "больница": "hospital", "госпіталь": "hospital",
+    "госпиталь": "hospital", "вокзал": "station", "станція": "station", "станция": "station", "метро": "station",
+    "музей": "museum", "фонтан": "fountain", "театр": "theatre", "ринок": "market", "рынок": "market",
+    "базар": "market", "ринк": "market", "рынк": "market", "кафе": "cafe", "ресторан": "restaurant", "бар": "bar", "аптека": "pharmacy",
+    "банк": "bank", "пошта": "post office", "почта": "post office", "поліція": "police", "полиция": "police",
+    "бібліотека": "library", "библиотека": "library", "кінотеатр": "cinema", "кинотеатр": "cinema",
+    "готель": "hotel", "гостиница": "hotel", "супермаркет": "supermarket", "магазин": "supermarket",
+    "пекарня": "bakery", "пам'ятник": "monument", "памятник": "monument", "меморіал": "memorial",
+    "мемориал": "memorial", "заправка": "petrol station", "азс": "petrol station", "пожежна": "fire station",
+    "мерія": "town hall", "мерия": "town hall", "міськрада": "town hall", "горсовет": "town hall",
+    "посольство": "embassy"}.items()}
+
+
+def category_of(word: str) -> str | None:
+    """"церкви" -> "church", "школі" -> "school". Stems of 3 letters must match exactly ("сад", "бар")."""
+    w = fold(word)
+    for stem, cat in CATEGORY_STEMS.items():
+        if w == stem or (len(stem) >= 4 and same_word(w, stem) and abs(len(w) - len(stem)) <= 2):
+            return cat
+    return None
+
+
+_LATIN = str.maketrans({"а": "a", "б": "b", "в": "v", "г": "h", "ґ": "g", "д": "d", "е": "e", "є": "ie", "ж": "zh",
+                        "з": "z", "и": "y", "і": "i", "ї": "i", "й": "i", "к": "k", "л": "l", "м": "m", "н": "n",
+                        "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "kh", "ц": "ts",
+                        "ч": "ch", "ш": "sh", "щ": "shch", "ь": "", "ю": "iu", "я": "ia", "ы": "y", "э": "e",
+                        "ё": "io", "ъ": "", "'": "", "’": "", "ʼ": ""})
+
+
+def latin(text: str) -> str:
+    """Ukrainian national transliteration (Russian letters too): "Шевченка" -> "shevchenka". Lets a Latin-script
+    report find a Cyrillic place name, and the reverse, before sound-alike matching."""
+    t = unicodedata.normalize("NFC", text.lower())
+    t = re.sub(r"(?<![а-яіїєґ])є", "ye", t)
+    t = re.sub(r"(?<![а-яіїєґ])ю", "yu", t)
+    t = re.sub(r"(?<![а-яіїєґ])я", "ya", t)
+    t = re.sub(r"(?<![а-яіїєґ])ї", "yi", t)
+    return t.translate(_LATIN)
 
 
 # --- inflected names ----------------------------------------------------------------------------------------------
@@ -142,6 +205,17 @@ def _load_callsigns() -> dict[str, list[str]]:
 _CALLSIGNS = _load_callsigns()
 
 
+# NATO letters said in Cyrillic, mapped to the Latin callsign so "Альфа 1" and "Alpha 1" are one unit.
+_NATO_CYR = {fold(k): v for k, v in {
+    "альфа": "alpha", "браво": "bravo", "чарлі": "charlie", "чарли": "charlie", "дельта": "delta", "ехо": "echo",
+    "эхо": "echo", "фокстрот": "foxtrot", "гольф": "golf", "готель": "hotel", "отель": "hotel", "індія": "india",
+    "индия": "india", "джульєтта": "juliet", "джульетта": "juliet", "кіло": "kilo", "кило": "kilo", "ліма": "lima",
+    "лима": "lima", "майк": "mike", "оскар": "oscar", "папа": "papa", "квебек": "quebec", "ромео": "romeo",
+    "сьєрра": "sierra", "сиерра": "sierra", "сієра": "sierra", "танго": "tango", "юніформ": "uniform",
+    "юниформ": "uniform", "віктор": "victor", "виктор": "victor", "віскі": "whiskey", "виски": "whiskey",
+    "янкі": "yankee", "янки": "yankee", "зулу": "zulu"}.items()}
+
+
 def callsign(raw: str | None) -> str | None:
     """Canonical callsign: "Гранит" (Russian) and "Граніт" (Ukrainian) are one unit, and so are "Сокол" and "Сокіл"
     when the operator's table says so (data/callsigns.json). A number word becomes a digit ("Граніт два" -> "граніт
@@ -152,6 +226,10 @@ def callsign(raw: str | None) -> str | None:
     words = re.sub(r"[^\w\s'’-]|_", " ", words).split()
     if not words:
         return None
+    nato = _NATO_CYR.get(fold(words[0]))
+    if nato:   # "Альфа один" is the same unit as "Alpha 1"
+        nums = [_UNITS.get(fold(w), w) for w in words[1:]]
+        return " ".join([nato, *(str(int(n)) if isinstance(n, (int, float)) else n for n in nums)])
     head, rest = words[0], [str(int(_UNITS[fold(w)])) if fold(w) in _UNITS and float(_UNITS[fold(w)]).is_integer()
                             else w for w in words[1:]]
     for canon, alts in _CALLSIGNS.items():
@@ -381,25 +459,138 @@ def _anchor(name: str | None) -> dict | None:
     return {"name": name, "kind": "landmark"} if name else None
 
 
+# Spoken distance units (folded stems) -> metres per unit. Rewritten to "<n> м" before the patterns run.
+_UNIT_M = [(r"(?:километр\w*|км|клик\w*)", 1000), (r"(?:метр\w*|м)", 1), (r"(?:крок\w*|шаг\w*)", 0.75),
+           (r"(?:квартал\w*)", 100), (r"(?:хвилин\w*\s+пишки|минут\w*\s+пешком|хв\s+пишки)", 80)]
+_UNIT_ANY = "|".join(f"(?:{u})" for u, _ in _UNIT_M)
+_RANGE_SEP = r"(?:-|–|до|або|или|чи)"
+# Directions and other relations (folded). Each maps a phrase before the place to a relation.
+_REL_WORDS = [
+    (_alt("навпроти", "напроти", "напротив", "через дорогу від", "через дорогу от", "через вулицю від",
+          "через улицу от"), "opposite"),
+    (_alt("всередині", "всередину", "в середині", "внутри", "на території", "на территории", "у дворі", "во дворе"),
+     "inside"),
+    (_alt("в районі", "в районе", "у районі", "в околицях", "в окрестностях", "десь біля", "где-то возле",
+          "десь в районі", "в межах"), "around"),
+    (_alt("не доходячи до", "не доходя до", "не доїжджаючи до", "не доезжая до", "трохи не дійшовши до", "перед"),
+     "in_front_of"),
+    (_alt("по той бік", "по тій стороні", "по ту сторону", "на тому боці", "на той стороне", "за межами", "пройшовши",
+          "пройдя", "після", "после"), "behind"),
+    (_alt("ліворуч від", "зліва від", "слева от", "лівіше", "левее", "ліворуч", "слева"), "left_of"),
+    (_alt("праворуч від", "справа від", "справа от", "правіше", "правее", "праворуч", "справа"), "right_of"),
+]
+_CROSS = _alt("перехрестя", "перехресті", "перекресток", "перекрёсток", "перекрестке", "на розі", "ріг", "розі",
+              "угол", "углу", "на углу", "розвилка", "развилка")
+_ALONG = _alt("уздовж", "вздовж", "вдоль", "по вулиці", "по улице")
+_BEARING = rf"(?:по\s+)?(?:азимут\w*|пеленг\w*)\s+(?P<deg>\d{{1,2}}\s*[-–\s]\s*\d{{2}}\b|\d+(?:\.\d+)?|(?:\b(?:{_NUMW})\b\s*)+)\s*(?P<bu>градус\w*|мил\w*|тисячн\w*|тысячн\w*)?"
+
+
+def _bearing_deg(raw: str, unit: str | None) -> float | None:
+    """"45" -> 45; "15-00" -> 90 (Soviet-style divisions of the goniometer, 60-00 a full turn); "1600 мил" -> 90
+    (NATO mils, 6400 a full turn); "сорок п'ять градусів" -> 45."""
+    raw = raw.strip()
+    m = re.fullmatch(r"(\d{1,2})\s*[-–\s]\s*(\d{2})", raw)
+    if m:
+        return (int(m[1]) * 100 + int(m[2])) * 360 / 6000 % 360
+    n = number(raw)
+    if n is None:
+        return None
+    u = unit or ""
+    if u.startswith("мил"):
+        return n * 360 / 6400 % 360
+    if u.startswith(("тисячн", "тысячн")) or n > 360:
+        return n * 360 / 6000 % 360
+    return n % 360
+
+
+def _split_number(text: str) -> tuple[str, str]:
+    """Number words said back to back: a number reads big to small ("двісті п'ятдесят"), so a word bigger than the
+    one before it starts a new number. Returns (words before the last number, the last number)."""
+    ws = text.split()
+    vals = [_UNITS.get(w) if not w.replace(".", "").isdigit() else float(w) for w in ws]
+    if len(ws) < 2 or any(v is None for v in vals):
+        return "", text
+    start = len(ws) - 1
+    while start > 0 and vals[start - 1] > vals[start]:
+        start -= 1
+    return " ".join(ws[:start]), " ".join(ws[start:])
+
+
+def distances(c: str) -> tuple[str, dict]:
+    """Folded clause -> clause with every distance as "<n> м", and what it learnt: vague, distance_min_m/max_m."""
+    info: dict = {}
+    for pat, repl in ((_alt("пів кілометра", "півкілометра", "пол километра", "полкилометра", "півкіломeтра"), "500 м"),
+                      (_alt("кілька сотень метрів", "несколько сотен метров", "пару сотень метрів", "пару сотен метров",
+                            "кількасот метрів"), "300 м")):
+        if re.search(pat, c):
+            c = re.sub(pat, repl, c)
+            info["vague"] = info.get("vague") or repl == "300 м"
+
+    def factor(u: str) -> float:
+        return next(f for pat, f in _UNIT_M if re.fullmatch(pat, u))
+
+    def to_m(m: re.Match) -> str:
+        f = factor(m["u"])
+        lead, n = _split_number(m["n"])   # "сорок п'ять триста метрів": the angle, then 300 m
+        if lead:
+            return f"{lead} " + to_m_value(n, None, f, m)
+        return to_m_value(m["n"], m.groupdict().get("n2"), f, m)
+
+    def to_m_value(n: str, n2: str | None, f: float, m: re.Match) -> str:
+        a = number(n)
+        if a is None:
+            return m[0]
+        if n2:
+            b = number(n2)
+            if b is not None:
+                lo, hi = sorted((a * f, b * f))
+                info.update(distance_min_m=round(lo), distance_max_m=round(hi), vague=True)
+                return f"{round((lo + hi) / 2)} м "
+        if f in (100, 80, 0.75):
+            info["vague"] = True
+        return f"{round(a * f)} м "   # the number pattern eats the space after it
+
+    c = re.sub(rf"(?:\b(?:вид|от)\s+)?(?P<n>{_N})\s*{_RANGE_SEP}\s*(?P<n2>{_N})\s*(?P<u>{_UNIT_ANY})\b", to_m, c)
+    c = re.sub(rf"(?P<n>{_N})\s*(?P<u>{_UNIT_ANY})\b", to_m, c)
+    # "метрів сто" (unit before the number) is approximate
+    c = re.sub(rf"\b(?P<u>{_UNIT_ANY})\s+(?P<n>{_N})\b", lambda m: (info.__setitem__("vague", True), to_m(m))[1], c)
+    return re.sub(r"\s+", " ", c).strip(), info
+
+
 def parse_location(clause: str) -> dict | None:
     """One clause (folded) -> a report with anchor and relation, or None."""
     c = re.sub(rf"\b{POSITION_WORDS}\b", " ", clause)
     c = re.sub(r"\s+", " ", c).strip(" ,.;")
     if not c:
         return None
-    vague = bool(re.search(rf"\b{VAGUE}\b", c)) or bool(re.search(rf"\b{_M}\s+{_N}", c))
+    c, info = distances(c)
+    vague = bool(info.get("vague")) or bool(re.search(rf"\b{VAGUE}\b", c))
     dist = None
     m = re.search(_DIST, c)
     if m:
         dist = number(m["d1"] or m["d2"])
 
-    def out(rel, a, b=None, typ="position"):
+    def out(rel, a, b=None, typ="position", **more):
         anc = _anchor(a)
         if not anc:
             return None
-        return {"subject": None, "type": typ, "anchor": anc, "anchor2": _anchor(b), "relation": rel,
-                "distance_m": dist, "minutes_ago": None, "confidence": 0.5, "vague": vague}
+        r = {"subject": None, "type": typ, "anchor": anc, "anchor2": _anchor(b), "relation": rel,
+             "distance_m": dist, "minutes_ago": None, "confidence": 0.5, "vague": vague, **more}
+        for k in ("distance_min_m", "distance_max_m"):
+            if k in info:
+                r[k] = info[k]
+        return r
 
+    m = re.search(_BEARING, c)
+    if m:
+        deg = _bearing_deg(m["deg"], m["bu"])
+        rest = c[m.end():]
+        a = re.search(rf"(?:\b(?:вид|от)\s+)(?P<a>.+)", rest) or re.search(rf"(?:\b(?:вид|от)\s+)(?P<a>.+?)(?:\s+по\s+азимут|$)", c)
+        if deg is not None and a:
+            return out("bearing", a["a"], bearing_deg=deg)
+    m = re.search(rf"\b{_CROSS}\s+(?P<a>.+?)\s+(?:и|та|and|з|с)\s+(?P<b>.+)", c)
+    if m:
+        return out("intersection", m["a"], m["b"])
     m = re.search(rf"\b(?:миж|между|between)\s+(?P<a>.+?)\s+(?:и|та|and)\s+(?P<b>.+)", c)
     if m:
         return out("between", m["a"], m["b"])
@@ -412,6 +603,17 @@ def parse_location(clause: str) -> dict | None:
         rel = relation_of(re.sub(r"(?:ише|ее)$", "", d)) or relation_of(d)
         if rel:
             return out(rel, m["a"])
+    for words_, rel in _REL_WORDS:
+        m = re.search(rf"\b{words_}\s+(?:вид\s+|от\s+)?(?P<a>(?!{_N}\s*м\b).+)", c)
+        if m:
+            return out(rel, m["a"])
+    # "300 метрів від школи": a distance with no direction
+    m = re.search(rf"(?:{_DIST})\s+(?:вид|от)\s+(?P<a>.+)", c)
+    if m:
+        return out("from", m["a"])
+    m = re.search(rf"\b{_ALONG}\s+(?P<a>.+)", c)
+    if m:
+        return out("along", m["a"], typ="movement")
     m = re.search(rf"\b{MOVE_VERBS}\s+{TOWARDS}\s+(?P<a>.+)", c)
     if m:
         return out("towards", m["a"], typ="movement")
@@ -430,9 +632,23 @@ def parse_location(clause: str) -> dict | None:
     return None
 
 
+def _joins(text: str) -> str:
+    """Before folding: "двісті-триста метрів" is a range (folding would drop the dash and add them up), and
+    "азимут сорок п'ять, триста метрів від Сараю" is one clue said with a pause."""
+    def rng(m: re.Match) -> str:
+        before = fold(text[max(0, m.start() - 20):m.start()])
+        if re.search(r"(?:азимут|пеленг)\w*\s*$", before) or not (number(m[1]) and number(m[2])):
+            return m[0]
+        return f"{m[1]} до {m[2]}"
+    t = re.sub(r"([\w'’ʼ]+)\s*[-–]\s*([\w'’ʼ]+)", rng, text)
+    return re.sub(r"((?:азимут|пеленг)\w*\s+[^,.;]{1,30}?)\s*,\s*(?=[^,.;]{1,40}?\b(?:від|от)\b)", r"\1 ", t,
+                  flags=re.I)
+
+
 def stub_extract_uk(text: str) -> dict:
     """Rule-based fallback for Ukrainian/Russian radio reports: the closed demo grammar (header, corrections,
     holding, eight directions, distances, between/near/behind/at, movement). Free speech needs the language model."""
+    text = _joins(text)
     to, frm, single, body, _ = header(text)
     speaker = frm or (single if single and not (fold(single) in CONTROL_WORDS or single == "all stations") else None)
     t = strip_procedure(body)
@@ -450,7 +666,8 @@ def stub_extract_uk(text: str) -> dict:
     if seen is not None:
         sightings.append(contact_uk.report(", ".join(clauses[seen:]), speaker))
         clauses = clauses[:seen]
-    t = re.sub(r"\bне\s+[^,.;]*", " ", ", ".join(clauses))   # "не озеро": what it is not
+    # "не озеро": what it is not. But "не доходячи до X" (just short of X) is a place.
+    t = re.sub(r"\bне\s+(?!доход|доиждж|доезж|дойд)[^,.;]*", " ", ", ".join(clauses))
     intent = bool(re.search(rf"\b{INTENT}\b", t))
     reports = []
     for clause in filter(None, (c.strip() for c in re.split(r"\s*[,.;!?]\s*", t))):

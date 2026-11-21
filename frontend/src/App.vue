@@ -66,6 +66,7 @@ const customPlaces = ref([])
 const text = ref('')
 const callsign = ref('alpha 1')
 const lang = ref('en')
+const zone = ref(null)   // {name, label, lang}: the area of operations the backend runs on (ZONE=...)
 // Speech language: the browser recogniser, read-back voice and server speech-to-text hint. Auto lets the server decide.
 const SPEECH_LANG = { en: 'en-GB', fr: 'fr-FR', uk: 'uk-UA', ru: 'ru-RU', auto: 'en-GB' }
 const readBack = ref(true)
@@ -560,6 +561,8 @@ onMounted(async () => {
   if (!state) status.value = 'backend not reachable on :8000'
   serverStt.value = state?.stt ?? null
   sttOptions.value = state?.stt_options ?? []
+  zone.value = state?.zone ?? null
+  if (zone.value?.lang && zone.value.name !== 'paris') lang.value = zone.value.lang   // e.g. Irpin: Ukrainian
   customPlaces.value = state?.custom_places ?? []
   map = new maplibregl.Map({
     container: 'map', center: state?.centre ?? [2.334, 48.851], zoom: 15.5,
@@ -699,7 +702,7 @@ onUnmounted(() => {
     </div>
     <aside>
       <header>
-        <h1>Voice-to-Map</h1>
+        <h1>Voice-to-Map <span v-if="zone" class="zone">{{ zone.label }}</span></h1>
         <span class="status">{{ status }} · speech:
           <select v-if="sttOptions.length" class="stt" :value="serverStt || 'none'" title="Speech-to-text"
             @change="chooseStt($event.target.value)">
@@ -896,6 +899,7 @@ aside { display: flex; flex-direction: column; gap: 12px; padding: 14px; overflo
 header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 h1 { font-size: 15px; margin: 0; letter-spacing: 0.08em; text-transform: uppercase; }
 .status { color: var(--muted); font-size: 12px; text-align: right; }
+h1 .zone { display: block; font-size: 11px; font-weight: 400; color: var(--muted); }
 .status select.stt { padding: 1px 4px; font-size: 12px; }
 form { display: grid; gap: 8px; }
 textarea, input.callsign, select, input.wide { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;

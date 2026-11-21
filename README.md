@@ -38,6 +38,17 @@ keys everything runs offline apart from the map tiles: a rule-based extractor (E
 grammar) and local Whisper (`pip install faster-whisper`) or the browser's speech recognition. If a cloud call fails,
 the report still goes through the rules, so the map never stops.
 
+**Ukrainian demo (Irpin).** Run the backend on the Irpin zone instead of Paris; the map, codenames, demo nets and
+logs switch to `data/zones/irpin/`, and the app opens in Ukrainian:
+
+```bash
+ZONE=irpin .venv/bin/uvicorn backend.app:app --reload --port 8000
+```
+
+Then **Radio net → Replay demo net** (Ukrainian/Russian net; switch the language to EN for the English one), or say
+`Вежа, я Сокіл, двісті метрів на північ від Центрального ринку, прийом`. Accuracy:
+`python -m scripts.stress --zone irpin [--offline] [--holdout] [--pace 4.5]`.
+
 No callsign heard (noise, a clipped start)? With the **Default callsign** box filled in, the report goes to that unit,
 marked "(assumed)" and drawn dashed until confirmed. With it empty, the report is held, not plotted, and the map reads
 back "Station calling, say again your callsign". A reply such as "This is Delta three" within two minutes claims it.
@@ -214,6 +225,15 @@ What this repo can do now, grouped by area. Updated after each major implementat
 - One unit whatever the spelling: Граніт (UA) = Гранит (RU).
 - Radio procedure: "Вежа, я Сокіл… прийом", corrections ("мінус", "отставить").
 - A rule-based fallback when no language model is available, and a Ukrainian demo net to replay.
+- **A Ukrainian zone: Irpin** (`ZONE=irpin`, `data/zones/irpin/`): 250 places over 3 x 3 km from OpenStreetMap, named in
+  Ukrainian, with invented codenames, spoken aliases (UA/RU/EN), a Ukrainian/Russian and an English demo net.
+- **Ukrainian at the English level**: Cyrillic place names go through the full matcher (case endings, street said
+  without "вулиця", Russian forms such as "улица Шевченко", fuzzy and sound-alike), "біля церкви" by category, Latin
+  spellings both ways ("Soborna street" in Irpin, "Пантеон" in Paris), and Ukrainian/Russian names for the main Paris
+  landmarks. The offline rules now take ranges ("двісті-триста метрів"), units (км, пів кілометра, квартали, хвилин
+  пішки), bearings ("азимут 45", "азимут 15-00", mils), and навпроти / всередині / в районі / не доходячи до / по той
+  бік / ліворуч / праворуч / на перехресті / "N метрів від". Callsigns: 20 nicknames in `data/callsigns.json`, matched
+  by sound ("Сакіл" → Сокіл), and "Альфа один" = Alpha 1.
 - **Speech-to-text under radio noise** (`scripts/stt_bench.py`, the 21-line Ukrainian demo net, synthetic voices):
 
   | provider | audio | word errors | callsign | codenames | numbers | median time |

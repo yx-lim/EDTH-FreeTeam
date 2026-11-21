@@ -14,3 +14,6 @@ data/net.jsonl
 frontend/node_modules-icloud-old/
 .venv
 node_modules
+data/zones/*/events.jsonl
+data/zones/*/net.jsonl
+data/zones/*/custom_places.json

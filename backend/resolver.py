@@ -105,7 +105,8 @@ def resolve(report: dict, gaz: Gazetteer, last: BaseGeometry | None = None, elap
     else:
         # No previous position: the middle of the mapped area (the projection origin) breaks ties, so "the church"
         # is the one in the area of operations, not the biggest one on the map.
-        found = candidates(name, gaz, units, last_pt if last_pt is not None else Point(0, 0), anchor.get("kind"))
+        kind = "street" if relation == "intersection" else anchor.get("kind")   # a corner names streets first
+        found = candidates(name, gaz, units, last_pt if last_pt is not None else Point(0, 0), kind)
     if not found:
         return {"ok": False, "note": f"unknown place: {name!r}; say again or name a nearby street"}  # never guess
     if found[0].kind not in ("unit", "grid") and gaz.by_sound(name, found[0]):

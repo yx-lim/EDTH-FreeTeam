@@ -1,4 +1,8 @@
+import os
+
 import pytest
+
+os.environ.pop("ZONE", None)   # tests are written for the Paris zone; backend.zone reads this at import
 
 
 @pytest.fixture(autouse=True)

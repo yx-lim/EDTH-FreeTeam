@@ -52,7 +52,8 @@ Return only a JSON object:
      "vague": true if the distance is approximate ("about", "roughly", "a couple of hundred", "a few hundred",
               "maybe", "some"), else omit,
      "bearing_deg": only for relation "bearing": degrees clockwise from north ("bearing 045" -> 45, "1600 mils" ->
-                    90, "north-northeast" -> 22.5),
+                    90 (NATO mils, 6400 to a circle), "азимут 15-00" -> 90 (goniometer divisions, 60-00 to a circle),
+                    "азимут сорок п'ять" -> 45, "north-northeast" -> 22.5),
      "minutes_ago": number, only for relation "previous" ("back where I was ten minutes ago"), else null,
      "confidence": 0 to 1}} ]}}
 Rules:

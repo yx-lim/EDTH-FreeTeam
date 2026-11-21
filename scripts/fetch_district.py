@@ -3,6 +3,7 @@ and write data/gazetteer.json.
 
     python scripts/fetch_district.py                     # default: Saint-Germain-des-Pres, Paris 6e
     python scripts/fetch_district.py S W N E             # custom bounding box in degrees
+    python scripts/fetch_district.py --zone irpin        # a named zone (ZONES below) -> data/zones/irpin/
 """
 from __future__ import annotations
 
@@ -50,8 +51,27 @@ def category(tags: dict) -> str:
     return ""
 
 
+# Named zones: bounding box and the zone.json written next to the gazetteer.
+ZONES = {
+    # Irpin, Kyiv oblast: a town of streets, a river, parks and landmarks, fought over in 2022 and now behind the
+    # lines. OSM names are in Ukrainian. About 3 x 3 km around the city centre and the station.
+    "irpin": ((50.5083, 30.2266, 50.5353, 30.2690),
+              {"label": "Ірпінь (Irpin), Kyiv oblast", "lang": "uk"}),
+}
+
+
 def main() -> None:
-    s, w, n, e = map(float, sys.argv[1:5]) if len(sys.argv) >= 5 else DEFAULT_BBOX
+    global OUT
+    args = sys.argv[1:]
+    if "--zone" in args:
+        name = args[args.index("--zone") + 1]
+        bbox, meta = ZONES[name]
+        OUT = OUT.parent / "zones" / name / "gazetteer.json"
+        OUT.parent.mkdir(parents=True, exist_ok=True)
+        (OUT.parent / "zone.json").write_text(json.dumps({"name": name, **meta}, ensure_ascii=False, indent=1),
+                                              encoding="utf-8")
+        args = [str(x) for x in bbox]
+    s, w, n, e = map(float, args[:4]) if len(args) >= 4 else DEFAULT_BBOX
     bbox = f"{s},{w},{n},{e}"
     query = f"""[out:json][timeout:120];
 (

@@ -22,7 +22,9 @@ from .geo import Gazetteer  # noqa: E402
 from .net import Net  # noqa: E402
 from .tracker import Tracker  # noqa: E402
 
-DATA = Path(__file__).resolve().parent.parent / "data"
+from . import zone  # noqa: E402
+
+DATA = zone.DIR      # data/ for Paris, data/zones/<name>/ otherwise: each zone keeps its own logs
 LOG = DATA / "events.jsonl"
 
 app = FastAPI(title="Voice-to-Map")
@@ -162,6 +164,8 @@ async def net_replay(speed: float = 3.0, script: str = "en") -> dict:
     if replay_task and not replay_task.done():
         raise HTTPException(409, "a replay is already running")
     path = DATA / ("demo_net_uk.jsonl" if script == "uk" else "demo_net.jsonl")
+    if not path.exists():
+        raise HTTPException(404, f"no {path.name} for zone {zone.NAME}")
     lines = [json.loads(s) for s in path.read_text(encoding="utf-8").splitlines() if s.strip()]
 
     async def run() -> None:
@@ -179,7 +183,8 @@ async def net_replay(speed: float = 3.0, script: str = "en") -> dict:
 def state() -> dict:
     return {"centre": [gaz.proj.lon0, gaz.proj.lat0], "bbox": gaz.bbox, "places": len(gaz.places),
             "events": [tracker.public(e) for e in tracker.events], "custom_places": gaz.custom(),
-            "transmissions": net.transmissions[-500:], "stt": stt.provider(), "stt_options": stt.available()}
+            "transmissions": net.transmissions[-500:], "stt": stt.provider(), "stt_options": stt.available(),
+            "zone": zone.info()}
 
 
 class SttChoice(BaseModel):
