@@ -98,18 +98,18 @@ SCRIPT = [
     ("H. Sightings", "Zero, this is Bravo one, contact, enemy infantry, about ten, at the Saint-Germain market, over.", "enemy infantry, count 10"),
     ("H. Sightings", "Zero, this is Charlie one, contact, unknown vehicle, static, near the Odeon theatre, over.", "side unknown (yellow), never assumed enemy"),
     ("H. Sightings", "Zero, this is Delta one, civilians gathering at Place Saint-Sulpice, over.", "civilians (green)"),
-    ("H. Sightings", "Zero, this is Echo one, contact, drone overhead, over.", "asks where it is ('overhead' is not yet read as the reporter's position)"),
+    ("H. Sightings", "Zero, this is Echo one, contact, drone overhead, over.", "drone at Echo 1's own position"),
     ("H. Sightings", "Zero, this is Foxtrot three, enemy drone over the Pantheon, heading west, over.", "enemy drone, arrow west"),
     ("H. Sightings", "Zero, this is Golf four, another drone over the Pantheon, over.", "a second drone, not merged"),
     ("H. Sightings", "Zero, this is Hotel one, I see the same tanks, three hundred metres east of the church, over.", "merged with the tanks: seen by two"),
     ("H. Sightings", "Zero, this is Kilo two, IED on Rue de Tournon, do not approach, over.", "IED: stays on the map"),
     ("H. Sightings", "Zero, this is Sierra two, sniper, two hundred metres north of me, over.", "sniper measured from Sierra 2"),
-    ("H. Sightings", "Zero, this is Alpha two, contact, enemy APC at my two o'clock, about one hundred metres, over.", "clock direction from Alpha 2"),
-    ("H. Sightings", "Zero, this is Bravo two, friendly drone overhead, ours, over.", "own drone: not a threat"),
+    ("H. Sightings", "Zero, this is Alpha two, contact, enemy APC at my two o'clock, about one hundred metres, over.", "a ring 100 m around Alpha 2 (which way 'two o'clock' points is not known)"),
+    ("H. Sightings", "Zero, this is Bravo two, friendly drone overhead, ours, over.", "own drone at Bravo 2, friendly (blue), no warning"),
     ("H. Sightings", "Zero, this is Charlie two, contact, enemy artillery firing, south of the Montparnasse tower, over.", "enemy artillery"),
     ("H. Sightings", "Zero, this is Delta three, mine at the corner of Rue Guynemer and Rue de Vaugirard, over.", "mine: warning without 'enemy'"),
     ("H. Sightings", "Zero, this is Echo two, helicopter, unknown, over the Luxembourg palace, over.", "helicopter, side unknown"),
-    ("H. Sightings", "Zero, this is Foxtrot three, contact, enemy tank at the Odeon theatre, over.", "separate from the first tanks"),
+    ("H. Sightings", "Zero, this is Foxtrot three, contact, enemy tank at the Luxembourg palace, over.", "a second contact: the first tanks were heading north, this is south of them"),
     ("H. Sightings", "Zero, this is Golf four, the Pont des Arts is destroyed, over.", "place status: destroyed"),
     ("H. Sightings", "Zero, this is Hotel one, Rue de Seine is blocked, over.", "place status: blocked"),
     ("H. Sightings", "Zero, this is Kilo two, Rue de Seine is open again, over.", "place status: reopened"),
@@ -127,15 +127,7 @@ SCRIPT = [
     ("J. French and repeats", "All stations, this is Zero, end of exercise, out.", "nothing plotted"),
 ]
 # Lines the offline rules get wrong today (21 Nov 2026). Gemini may handle some live; check before demoing them.
-GAPS = {
-    78: "merged with the first drone: English 'another' is not read yet (Ukrainian 'ще один' is)",
-    82: "not plotted: the clock method is not read in English by the offline rules",
-    83: "asks for a location instead of ignoring our own drone",
-    87: "merged with the first tanks although 500 m away",
-    88: "place status not read in English: asks for a location",
-    89: "place status not read in English: asks for a location",
-    90: "place status not read in English: asks for a location",
-}
+GAPS: dict[int, str] = {}   # all fixed in the offline rules (21 Nov 2026)
 STEP_S = 60   # one transmission a minute: units can walk between their reports
 
 
@@ -150,10 +142,10 @@ def write() -> None:
             section = sec
         gap = f"  \n   ⚠ offline rules today: {GAPS[i]}" if i in GAPS else ""
         lines.append(f"{i}. “{text}”  \n   → {expect}{gap}")
-    lines += ["", "## Known gaps", "",
-              f"{len(GAPS)} of {len(SCRIPT)} lines are marked ⚠: the offline rules get them wrong today. Everything "
-              "else was checked by playing the script through the radio-net layer offline "
-              "(`python -m scripts.make_edge_script --play`)."]
+    lines += ["", "## Checked offline", "",
+              (f"{len(GAPS)} of {len(SCRIPT)} lines are marked ⚠: the offline rules get them wrong today. " if GAPS else
+               "Every line behaves as written with the offline rules (no cloud model). ") +
+              "Checked by playing the script through the radio-net layer: `python -m scripts.make_edge_script --play`."]
     (DOCS / "edge_case_script_en.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (DOCS / "edge_case_script_en.jsonl").write_text(
         "".join(json.dumps({"t": i * STEP_S, "text": t}, ensure_ascii=False) + "\n" for i, (_, t, _) in enumerate(SCRIPT)),

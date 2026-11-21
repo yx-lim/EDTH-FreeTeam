@@ -113,7 +113,9 @@ def describe(clauses: list[str], number) -> dict:
         hm = re.search(_MOVING + r"\s+" + _HEADING, text)
         if hm:
             heading = _FR_DIRS.get(hm.group("h"), hm.group("h"))
-    out = {"what": what, "side": side, "count": int(count) if count else None, "activity": activity, "heading": heading}
+    out = {"what": what, "side": side, "count": int(count) if count else None, "activity": activity, "heading": heading,
+           # "another drone", "a second tank": a new one, never merged with the last (like "ще один")
+           "another": bool(re.search(r"\b(?:another|a second|one more|un autre|une autre|encore un|encore une)\b", text))}
     if what == "obstacle":   # a place's state: no side, no count, it does not move, and it stays until reported open
         out.update(side="unknown", count=None, activity=None, heading=None, detail=obstacle_detail(text), ttl_s=TTL_S["obstacle"])
     return out
@@ -200,6 +202,17 @@ def reach_m(c: dict, dt: float) -> float:
         return 0.0
     far = SPEED_MPS.get(c.get("what"), 3.0) * max(0.0, dt)
     return min(far, MOVED_MAX_M if c.get("activity") == "moving" or c.get("heading") else DRIFT_M)
+
+
+HEADING_DEG = {"north": 0, "northeast": 45, "east": 90, "southeast": 135, "south": 180, "southwest": 225, "west": 270,
+               "northwest": 315}
+
+
+def against_heading(c: dict, bearing_deg: float) -> bool:
+    """A contact last reported moving one way, now seen in the opposite direction from where it was: not the same
+    one ("two tanks moving north", then "a tank" 400 m to the south)."""
+    h = HEADING_DEG.get(c.get("heading") or "")
+    return h is not None and abs((bearing_deg - h + 180) % 360 - 180) > 100
 
 
 def ttl(c: dict | None) -> float:

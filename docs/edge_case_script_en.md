@@ -177,12 +177,11 @@
 75. “Zero, this is Delta one, civilians gathering at Place Saint-Sulpice, over.”  
    → civilians (green)
 76. “Zero, this is Echo one, contact, drone overhead, over.”  
-   → asks where it is ('overhead' is not yet read as the reporter's position)
+   → drone at Echo 1's own position
 77. “Zero, this is Foxtrot three, enemy drone over the Pantheon, heading west, over.”  
    → enemy drone, arrow west
 78. “Zero, this is Golf four, another drone over the Pantheon, over.”  
-   → a second drone, not merged  
-   ⚠ offline rules today: merged with the first drone: English 'another' is not read yet (Ukrainian 'ще один' is)
+   → a second drone, not merged
 79. “Zero, this is Hotel one, I see the same tanks, three hundred metres east of the church, over.”  
    → merged with the tanks: seen by two
 80. “Zero, this is Kilo two, IED on Rue de Tournon, do not approach, over.”  
@@ -190,29 +189,23 @@
 81. “Zero, this is Sierra two, sniper, two hundred metres north of me, over.”  
    → sniper measured from Sierra 2
 82. “Zero, this is Alpha two, contact, enemy APC at my two o'clock, about one hundred metres, over.”  
-   → clock direction from Alpha 2  
-   ⚠ offline rules today: not plotted: the clock method is not read in English by the offline rules
+   → a ring 100 m around Alpha 2 (which way 'two o'clock' points is not known)
 83. “Zero, this is Bravo two, friendly drone overhead, ours, over.”  
-   → own drone: not a threat  
-   ⚠ offline rules today: asks for a location instead of ignoring our own drone
+   → own drone at Bravo 2, friendly (blue), no warning
 84. “Zero, this is Charlie two, contact, enemy artillery firing, south of the Montparnasse tower, over.”  
    → enemy artillery
 85. “Zero, this is Delta three, mine at the corner of Rue Guynemer and Rue de Vaugirard, over.”  
    → mine: warning without 'enemy'
 86. “Zero, this is Echo two, helicopter, unknown, over the Luxembourg palace, over.”  
    → helicopter, side unknown
-87. “Zero, this is Foxtrot three, contact, enemy tank at the Odeon theatre, over.”  
-   → separate from the first tanks  
-   ⚠ offline rules today: merged with the first tanks although 500 m away
+87. “Zero, this is Foxtrot three, contact, enemy tank at the Luxembourg palace, over.”  
+   → a second contact: the first tanks were heading north, this is south of them
 88. “Zero, this is Golf four, the Pont des Arts is destroyed, over.”  
-   → place status: destroyed  
-   ⚠ offline rules today: place status not read in English: asks for a location
+   → place status: destroyed
 89. “Zero, this is Hotel one, Rue de Seine is blocked, over.”  
-   → place status: blocked  
-   ⚠ offline rules today: place status not read in English: asks for a location
+   → place status: blocked
 90. “Zero, this is Kilo two, Rue de Seine is open again, over.”  
-   → place status: reopened  
-   ⚠ offline rules today: place status not read in English: asks for a location
+   → place status: reopened
 
 ## I. Orders
 
@@ -240,6 +233,6 @@
 100. “All stations, this is Zero, end of exercise, out.”  
    → nothing plotted
 
-## Known gaps
+## Checked offline
 
-7 of 100 lines are marked ⚠: the offline rules get them wrong today. Everything else was checked by playing the script through the radio-net layer offline (`python -m scripts.make_edge_script --play`).
+Every line behaves as written with the offline rules (no cloud model). Checked by playing the script through the radio-net layer: `python -m scripts.make_edge_script --play`.

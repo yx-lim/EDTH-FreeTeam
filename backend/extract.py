@@ -530,6 +530,37 @@ def _parse_clause_normalised(clause: str) -> dict | None:
     return None
 
 
+# The clock method: "at my two o'clock, about a hundred metres". Twelve o'clock is the way the speaker faces, which
+# the net does not know, so only the distance is used: a ring around the reporter (as lang_uk.CLOCK does).
+_CLOCK = r"\b(?:at\s+)?(?:my|our|your)?\s*(?:\w+\s+)?o\s*clock\b"
+# Overhead / above us: the thing is where the reporter is ("drone overhead", "helicopter above us").
+_OVERHEAD = r"\b(?:overhead|above (?:us|me|my position|our position)|over (?:us|me|my position|our position)|au dessus de nous)\b"
+
+
+def _contact_place(sighting: list[str], desc: dict) -> dict | None:
+    """Where a sighting is, from its clauses (offline rules). Besides the usual "300 m east of the church":
+    the clock method and "overhead" (relative to the reporter), and a place whose state is reported ("the Pont des
+    Arts is destroyed": the subject is the place)."""
+    text = " , ".join(sighting)
+    if re.search(_CLOCK, text):
+        norm_text, info = _distances(text)
+        m = re.search(rf"(?P<d>{_NUM})\s*{_UNIT}\b", norm_text)
+        d = _number(m["d"]) if m else None
+        return {**_other(), "type": "position", "anchor": {"name": "me", "kind": "unit"},
+                "relation": "from" if d else "near", "distance_m": d, "vague": True, "confidence": 0.5,
+                "clock": True, **{k: v for k, v in info.items() if k != "vague"}}
+    r = next((x for x in map(_parse_clause, contact.location_clauses(sighting)) if x and x["type"] == "position"), None)
+    if r is None and re.search(_OVERHEAD, text):
+        return {**_other(), "type": "position", "anchor": {"name": "me", "kind": "unit"}, "relation": "at",
+                "confidence": 0.5}
+    if r is None and desc.get("what") == "obstacle":
+        for c in contact.location_clauses(sighting):   # "the pont des arts" left once "is destroyed" is removed
+            a = _anchor(re.sub(r"^(?:the|la|le|les|l)\s+", "", c))
+            if a:
+                return {**_other(), "type": "position", "anchor": a, "relation": "at", "confidence": 0.5}
+    return r
+
+
 def stub_extract(text: str) -> dict:
     if lang_uk.cyrillic_share(text) > 0.3:   # Ukrainian / Russian radio procedure and the demo grammar
         return validate(lang_uk.stub_extract_uk(text))
@@ -581,9 +612,10 @@ def stub_extract(text: str) -> dict:
     seen = next((i for i, c in enumerate(clauses) if contact.starts_contact(c)), None)
     if seen is not None:
         sighting, clauses = clauses[seen:], clauses[:seen]
-        r = next((x for x in map(_parse_clause, contact.location_clauses(sighting)) if x and x["type"] == "position"), None)
+        desc = contact.describe(sighting, _number)
+        r = _contact_place(sighting, desc)
         r = contact.self_anchor({**(r or _other()), "subject": None, "type": "contact"}, speaker)
-        r["contact"] = contact.describe(sighting, _number)
+        r["contact"] = desc
         if r["contact"]["what"] == "obstacle":   # "the bridge / near the Odeon is destroyed": the object may sit in an earlier clause
             r["contact"]["detail"] = contact.obstacle_detail(t) or r["contact"]["detail"]
             clauses = [c for c in clauses if not contact.object_only(c)]

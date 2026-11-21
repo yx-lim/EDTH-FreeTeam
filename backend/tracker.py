@@ -279,6 +279,9 @@ class Tracker:
             # A new report that says "static" is about something that has not moved either.
             moved = 0.0 if desc.get("activity") == "static" else contacts.reach_m(tr["contact"], now - tr["t"])
             d = tr["geom"].distance(geom)
+            if d > contacts.SAME_PLACE_M and contacts.against_heading(
+                    tr["contact"], bearing(tr["geom"].centroid, geom.centroid)):
+                continue   # it was heading the other way: a second contact
             if d <= contacts.SAME_PLACE_M + moved and (best_d is None or d < best_d):
                 best, best_d = cs, d
         return best
