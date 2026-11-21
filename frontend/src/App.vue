@@ -254,7 +254,7 @@ async function talk(start) {
   if (start) {
     recogniser?.abort()                       // a late event from an earlier press must not send again
     const rec = new Speech(), finals = []
-    let interim = '', sent = false
+    let interim = '', sent = false, failed = false
     rec.lang = lang.value === 'fr' ? 'fr-FR' : 'en-GB'
     rec.continuous = true                     // a pause mid-sentence must not end the transmission
     rec.interimResults = true                 // live text only; never sent
@@ -273,10 +273,10 @@ async function talk(start) {
       recogniser = null
       const t = [...finals.filter(Boolean), interim.trim()].filter(Boolean).join(' ').trim()
       if (t) send(t, { voice: true })
-      else heard.value = 'heard nothing'
+      else if (!failed) heard.value = 'heard nothing'   // keep an error from onerror on screen
       listening.value = false
     }
-    rec.onerror = (e) => { if (e.error !== 'aborted' && e.error !== 'no-speech') heard.value = `speech: ${e.error}` }
+    rec.onerror = (e) => { if (e.error !== 'aborted' && e.error !== 'no-speech') { failed = true; heard.value = `speech: ${e.error}` } }
     recogniser = rec
     rec.start()
   } else {
