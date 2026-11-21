@@ -234,6 +234,15 @@ What this repo can do now, grouped by area. Updated after each major implementat
   пішки), bearings ("азимут 45", "азимут 15-00", mils), and навпроти / всередині / в районі / не доходячи до / по той
   бік / ліворуч / праворуч / на перехресті / "N метрів від". Callsigns: 20 nicknames in `data/callsigns.json`, matched
   by sound ("Сакіл" → Сокіл), and "Альфа один" = Alpha 1.
+- **Accuracy in Irpin** (`python -m scripts.stress --zone irpin`; truths computed from OSM geometry, so this measures
+  hearing, naming and geometry, not real soldiers):
+
+  | set | extractor | decision | callsign | place | truth inside |
+  |---|---|---|---|---|---|
+  | tuning, 40 turns | offline rules | 40/40 | 36/36 | 35/35 | 36/36 |
+  | tuning, 40 turns | Gemini | 40/40 | 36/36 | 35/35 | 36/36 |
+  | held out, 30 turns | offline rules | 30/30 | 28/28 | 28/28 | 25/28 |
+  | held out, 30 turns | Gemini | 29/30 | 27/28 | 27/27 | 27/28 |
 - **Speech-to-text under radio noise** (`scripts/stt_bench.py`, the 21-line Ukrainian demo net, synthetic voices):
 
   | provider | audio | word errors | callsign | codenames | numbers | median time |
