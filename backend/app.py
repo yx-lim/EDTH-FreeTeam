@@ -25,6 +25,13 @@ DATA = Path(__file__).resolve().parent.parent / "data"
 LOG = DATA / "events.jsonl"
 
 app = FastAPI(title="Voice-to-Map")
+
+
+@app.on_event("startup")
+async def _warm_speech_to_text() -> None:
+    stt.warm()
+
+
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 gaz = Gazetteer()

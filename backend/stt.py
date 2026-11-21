@@ -3,20 +3,62 @@
 Providers, picked by STT_PROVIDER or automatically:
   mistral  Voxtral via Mistral's API, primed with the district's place names (context_bias). Needs MISTRAL_API_KEY.
   whisper  faster-whisper running locally, primed through initial_prompt. Offline. `pip install faster-whisper`.
+           Default `small` on the CPU: ~2-3 s a clip on an M-series Mac. large-v3-turbo is more accurate (12% vs 19%
+           word errors on the demo net) but takes ~17 s a clip on the CPU. Its Apple GPU backend (WHISPER_DEVICE=mps)
+           is ~2.4 s a clip but experimental: in testing it failed on every clip after the first, so it is opt-in.
 """
 from __future__ import annotations
 
 import asyncio
 import io
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 
 STT_URL = "https://api.mistral.ai/v1/audio/transcriptions"
 STT_MODEL = os.getenv("STT_MODEL", "voxtral-mini-transcribe-3")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 _whisper = None
+_whisper_lock = threading.Lock()
+# One thread owns the model, so two quick presses queue rather than compete for the CPU.
+_whisper_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper")
+
+
+def _load_whisper():
+    """Load once (the first load downloads the model: ~0.5 GB for small, ~1.6 GB for large-v3-turbo)."""
+    global _whisper
+    with _whisper_lock:
+        if _whisper is None:
+            from faster_whisper import WhisperModel
+            try:
+                _whisper = WhisperModel(WHISPER_MODEL, device=WHISPER_DEVICE,
+                                        compute_type="float16" if WHISPER_DEVICE == "mps" else "int8")
+            except (ValueError, RuntimeError):   # a CTranslate2 build without the Metal backend: CPU, small model
+                _whisper = WhisperModel(os.getenv("WHISPER_MODEL", "small"), device="cpu", compute_type="int8")
+    return _whisper
+
+
+def _pcm(wav: bytes):
+    """The browser's 16 kHz mono 16-bit WAV as float samples. Decoding it here avoids faster-whisper's PyAV path,
+    which breaks when PyAV and faster-whisper versions drift apart (and is not needed for plain WAV)."""
+    import wave
+
+    import numpy as np
+
+    with wave.open(io.BytesIO(wav)) as w:
+        if w.getframerate() != 16000 or w.getnchannels() != 1 or w.getsampwidth() != 2:
+            return io.BytesIO(wav)   # anything else: let faster-whisper decode and resample it
+        return np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768
+
+
+def warm() -> None:
+    """Load the local model in the background at startup, so the first push-to-talk does not wait for it."""
+    if provider() == "whisper":
+        _whisper_thread.submit(_load_whisper)
 
 
 def provider() -> str | None:
@@ -53,15 +95,9 @@ async def _mistral(audio: bytes, vocabulary: list[str], language: str | None) ->
 
 
 async def _local(audio: bytes, vocabulary: list[str], language: str | None) -> str:
-    global _whisper
-    from faster_whisper import WhisperModel
-
-    if _whisper is None:
-        _whisper = WhisperModel(WHISPER_MODEL, compute_type="int8")
-
     def run() -> str:
-        segments, _ = _whisper.transcribe(io.BytesIO(audio), language=language, vad_filter=True,
+        segments, _ = _load_whisper().transcribe(_pcm(audio), language=language, vad_filter=True,
                                           initial_prompt="Radio position report. Places: " + ", ".join(vocabulary[:40]))
         return " ".join(s.text for s in segments)
 
-    return await asyncio.to_thread(run)
+    return await asyncio.get_running_loop().run_in_executor(_whisper_thread, run)
