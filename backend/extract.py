@@ -14,7 +14,7 @@ import unicodedata
 
 import httpx
 
-from . import lang_uk
+from . import contact, lang_uk
 from .geo import norm
 
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
@@ -23,7 +23,7 @@ MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
 RELATIONS = ["at", "near", "behind", "in_front_of", "north_of", "south_of", "east_of", "west_of",
              "northeast_of", "northwest_of", "southeast_of", "southwest_of",
              "between", "intersection", "towards", "along", "previous"]
-TYPES = ["position", "movement", "correction", "holding", "intent", "other"]
+TYPES = ["position", "movement", "correction", "holding", "intent", "contact", "other"]
 
 SYSTEM = f"""You turn one radio transmission into JSON for a live map. It may be English or French, may contain
 fillers, radio procedure ("Zero, this is Alpha two ... over") and transcription errors.
@@ -46,6 +46,13 @@ Rules:
 - "I'm with Bravo one" / "50 m north of Bravo one": anchor kind "unit", name "bravo 1".
 - A place mentioned only as context ("can see the church", "not far from the market") is not the anchor.
 - Radio checks, acknowledgements ("roger", "wilco", "say again"): reports = [{{"type": "other", ...}}].
+- Something SEEN (enemy, vehicles, drones, aircraft, artillery, IEDs, civilians): a separate report with type "contact",
+  subject null, the anchor fields saying where the THING is, plus
+  "contact": {{"what": one of {contact.WHATS}, "side": one of {contact.SIDES}, "count": number or null,
+              "activity": "moving" | "static" | "firing" | null, "heading": compass direction or null}}.
+  side is "hostile" ONLY if the speaker says enemy/hostile; never infer it. Otherwise "unknown" (civilians: "neutral").
+  "300 m east of me" -> anchor {{"name": "me", "kind": "unit"}}, relation "east_of", distance_m 300.
+  "moving north" is the heading, not the location. The speaker's own position, if also given, is its own report.
 Never output coordinates. Never invent a place that was not spoken.
 
 Examples:
@@ -54,7 +61,9 @@ Examples:
 "Charlie one and Charlie two at the corner of rue de Tournon and rue de Vaugirard" ->
 {{"speaker":"charlie 1","reports":[{{"subject":"charlie 1","type":"position","anchor":{{"name":"rue de Tournon","kind":"street"}},"anchor2":{{"name":"rue de Vaugirard","kind":"street"}},"relation":"intersection","distance_m":null,"minutes_ago":null,"confidence":0.9}},{{"subject":"charlie 2","type":"position","anchor":{{"name":"rue de Tournon","kind":"street"}},"anchor2":{{"name":"rue de Vaugirard","kind":"street"}},"relation":"intersection","distance_m":null,"minutes_ago":null,"confidence":0.9}}]}}
 "Alpha deux, je me dirige vers le boulevard Saint-Germain" ->
-{{"speaker":"alpha 2","reports":[{{"subject":null,"type":"movement","anchor":{{"name":"boulevard Saint-Germain","kind":"street"}},"anchor2":null,"relation":"towards","distance_m":null,"minutes_ago":null,"confidence":0.9}}]}}"""
+{{"speaker":"alpha 2","reports":[{{"subject":null,"type":"movement","anchor":{{"name":"boulevard Saint-Germain","kind":"street"}},"anchor2":null,"relation":"towards","distance_m":null,"minutes_ago":null,"confidence":0.9}}]}}
+"Zero, Bravo one, contact, two enemy tanks moving north, three hundred metres east of the church, over" ->
+{{"speaker":"bravo 1","reports":[{{"subject":null,"type":"contact","anchor":{{"name":"church","kind":"landmark"}},"anchor2":null,"relation":"east_of","distance_m":300,"minutes_ago":null,"confidence":0.8,"contact":{{"what":"tank","side":"hostile","count":2,"activity":"moving","heading":"north"}}}}]}}"""
 
 
 async def extract(text: str) -> dict:
@@ -120,6 +129,12 @@ def validate(d: dict) -> dict:
             except (TypeError, ValueError):
                 r[k] = None
         r["subject"] = _callsign(r.get("subject") or r.get("callsign"))
+        if r["type"] == "contact":
+            r["subject"] = None   # a sighting is never a unit's own position
+            r["contact"] = contact.validate(r.get("contact"))
+            if (r.get("anchor") or {}).get("name") and re.fullmatch(contact.SELF, norm(r["anchor"]["name"])):
+                r["anchor"] = {"name": _callsign(d.get("speaker")) or "me", "kind": "unit"}
+                r["relative_to_reporter"] = True
         reports.append(r)
     return {"speaker": _callsign(d.get("speaker")), "reports": reports or [_other()]}
 
@@ -260,6 +275,10 @@ def stub_extract(text: str) -> dict:
     # No addressee, as people often speak: "This is Delta three, behind the church", maybe after a false start
     # ("this is, hi, this is Delta three"). Up to five words may come before the last "this is <callsign>".
     m = m or re.match(rf"(?:[\w']+[\s,]+){{0,5}}?(?:this is|ici)\s+(?P<frm>{_CS})\b[\s,]*", t)
+    # "Zero, Alpha two, ...": calling the control station without "this is". Zero never reports a position of its own.
+    m = m or re.match(rf"(?P<to>zero|control|command|hq)\s*,?\s*(?P<frm>{_CS})\b[\s,]*", t)
+    if m and m.group("frm") in ("zero", "control", "command", "hq"):
+        m = None
     if m:
         speaker, t = _callsign(m.group("frm")), t[m.end():]
     else:
@@ -285,7 +304,17 @@ def stub_extract(text: str) -> dict:
     clauses = re.split(rf"\s*[,.;]\s*|\s+(?=(?:i m|i am|we re|we are|je suis)\b)|\s+(?={_CS}\s+(?:is|est)\b)"
                        r"|\s+(?=(?:by|near|next to|close to|beside) (?:the )?\w)", t)   # "west side of X by the Y": two clues
     reports, current = [], None
-    for clause in filter(None, (c.strip() for c in clauses)):
+    clauses = [c.strip() for c in clauses if c and c.strip()]
+    # A sighting runs from the first clause that starts one to the end of the transmission; what comes before is the
+    # speaker's own position ("at the church, contact, enemy tank 200 m north of me").
+    seen = next((i for i, c in enumerate(clauses) if contact.starts_contact(c)), None)
+    if seen is not None:
+        sighting, clauses = clauses[seen:], clauses[:seen]
+        r = next((x for x in map(_parse_clause, contact.location_clauses(sighting)) if x and x["type"] == "position"), None)
+        r = contact.self_anchor({**(r or _other()), "subject": None, "type": "contact"}, speaker)
+        r["contact"] = contact.describe(sighting, _number)
+        reports.append(r)
+    for clause in clauses:
         m = re.match(rf"(?P<s>{_CS})\s+(?:is|est)\b\s*", clause)
         if m:
             current, clause = _callsign(m.group("s")), clause[m.end():]
@@ -300,4 +329,5 @@ def stub_extract(text: str) -> dict:
             r["type"] = "correction"
         for s in (subjects if subjects and current is None else [current]):
             reports.append({**r, "subject": s})
-    return validate({"speaker": speaker, "reports": reports or [_other()]})
+    # the sighting is reported first: it matters most
+    return validate({"speaker": speaker, "reports": sorted(reports, key=lambda r: r["type"] != "contact") or [_other()]})

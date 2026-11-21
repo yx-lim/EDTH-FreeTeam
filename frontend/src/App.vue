@@ -13,6 +13,36 @@ const STALE_CAP_M = 1500
 const STALE_S = 300           // silent this long: the unit's frame turns dashed ("suspected" in APP-6)
 // APP-6 / MIL-STD-2525C friendly infantry: P = present (solid frame), A = anticipated/suspected (dashed frame).
 const SIDC = { solid: 'SFGPUCI--------', dashed: 'SFGAUCI--------' }
+// Contacts (what a unit saw). The APP-6 frame SHAPE carries the side, so it still reads in night mode (all red) and
+// for colour-blind users: hostile diamond, unknown quatrefoil, neutral square, friendly rectangle.
+const SIDE = { hostile: { code: 'H', colour: '#f87171', word: 'enemy' }, unknown: { code: 'U', colour: '#facc15', word: '' },
+  neutral: { code: 'N', colour: '#4ade80', word: '' }, friendly: { code: 'F', colour: '#60a5fa', word: 'friendly' } }
+// APP-6 battle dimension + status + function, after the side letter. Status P (present) becomes A (suspected,
+// dashed frame) while the contact is unconfirmed or getting old.
+const WHAT = { infantry: ['GPUCI', 'infantry'], sniper: ['GPUCIS', 'sniper'], tank: ['GPEVAT', 'tank'],
+  apc: ['GPEVAA', 'armoured vehicle'], vehicle: ['GPEV', 'vehicle'], artillery: ['GPUCF', 'artillery'],
+  drone: ['APMFQ', 'drone'], helicopter: ['APMH', 'helicopter'], aircraft: ['APMF', 'aircraft'], ied: ['GPEXI', 'IED'],
+  civilians: ['GP', 'civilians'], unknown: ['GP', 'contact'] }
+// How long a sighting stays on the map: a drone has moved on within minutes, an IED stays where it is.
+const CONTACT_TTL_S = { drone: 180, helicopter: 300, aircraft: 120, artillery: 600, sniper: 1800, ied: 86400, civilians: 1800 }
+const contactTtl = (c) => CONTACT_TTL_S[c?.what] ?? 900
+const sideOf = (c) => SIDE[c?.side] || SIDE.unknown
+const sidc = (c, doubt) => {
+  const f = (WHAT[c?.what] || WHAT.unknown)[0]
+  return `S${sideOf(c).code}${f[0]}${doubt ? 'A' : 'P'}${f.slice(2)}`.padEnd(15, '-')
+}
+// "2× enemy tank, moving north" / "vehicle (side unknown)"
+function describeContact(c, { spoken = false } = {}) {
+  if (!c) return 'contact'
+  const what = (WHAT[c.what] || WHAT.unknown)[1]
+  const n = c.count > 1 ? (spoken ? `${c.count} ` : `${c.count}× `) : ''
+  const side = sideOf(c).word ? `${sideOf(c).word} ` : ''
+  const unknown = c.side === 'unknown' || !SIDE[c.side] ? (spoken ? ', side unknown' : ' (side unknown)') : ''
+  const act = c.activity === 'moving' ? `, moving${c.heading ? ' ' + c.heading : ''}` : c.activity ? `, ${c.activity}` : ''
+  return `${n}${side}${what}${unknown}${act}`
+}
+const LEGEND = [['SFGPUCI', 'own unit'], ['SHGPUCI', 'enemy'], ['SUGPUCI', 'side unknown'], ['SNGP', 'neutral / civilians']]
+  .map(([code, label]) => ({ label, svg: new ms.Symbol(code.padEnd(15, '-'), { size: 12 }).asSVG() }))
 const BASEMAPS = {
   // OpenStreetMap with its brightness inverted and colour drained in the raster paint (no API key, unlike CARTO's dark).
   dark: { label: 'Dark', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], attribution: '© OpenStreetMap contributors',
@@ -43,8 +73,12 @@ const saved = (() => { try { return JSON.parse(localStorage.getItem('mapLook')) 
 const basemap = ref(saved.basemap in BASEMAPS ? saved.basemap : 'dark')
 const showGrid = ref(saved.showGrid ?? true)
 const night = ref(!!saved.night)  // red-on-black, keeps night vision at a dark command post
-watch([basemap, showGrid, night], () => {
-  try { localStorage.setItem('mapLook', JSON.stringify({ basemap: basemap.value, showGrid: showGrid.value, night: night.value })) } catch {}
+const showContacts = ref(saved.showContacts ?? true)
+watch([basemap, showGrid, night, showContacts], () => {
+  try {
+    localStorage.setItem('mapLook', JSON.stringify({ basemap: basemap.value, showGrid: showGrid.value, night: night.value,
+      showContacts: showContacts.value }))
+  } catch {}
 })
 const cursorGrid = ref('')     // MGRS under the mouse (or of the map centre on touch screens)
 let map, netRecogniser, ticker, socket, unmounted = false
@@ -69,7 +103,13 @@ const canListen = computed(() => (serverStt.value && canRecord) || !!Speech)
 
 const visible = computed(() => events.value.slice(0, cursor.value))
 const live = computed(() => cursor.value === events.value.length)
-const callsigns = computed(() => [...new Set(events.value.map((e) => e.callsign))])
+const isContact = (e) => e.type === 'contact'
+const callsigns = computed(() => [...new Set(events.value.filter((e) => !isContact(e)).map((e) => e.callsign))])
+// Sightings still worth showing: plotted, not withdrawn, and (live) younger than their type's lifetime.
+const contactsOnMap = computed(() => visible.value.filter((e) => isContact(e) && e.ok && !e.superseded
+  && (!live.value || now.value - e.t <= contactTtl(e.contact))))
+// One report is a draft (dashed) until confirmed; an ageing one is in doubt again.
+const contactDoubt = (e) => !e.confirmed || (live.value && now.value - e.t > contactTtl(e.contact) / 2)
 const colour = (c) => (callsigns.value.includes(c) ? COLOURS[callsigns.value.indexOf(c) % COLOURS.length] : '#374151')
 const byId = computed(() => new Map(events.value.map((e) => [e.id, e])))
 const visibleTx = computed(() => (live.value ? txs.value : txs.value.filter((tx) => tx.t <= (visible.value.at(-1)?.t ?? 0))))
@@ -101,7 +141,7 @@ async function confirm(e) {
 
 function render() {
   if (!map?.getSource('regions')) return
-  const ok = visible.value.filter((e) => e.ok && !e.superseded)
+  const ok = visible.value.filter((e) => e.ok && !e.superseded && !isContact(e))
   const latest = new Map()
   ok.forEach((e) => latest.set(e.callsign, e))
   const current = [...latest.values()]
@@ -132,11 +172,20 @@ function render() {
     type: 'Feature', geometry: e.target.region,
     properties: { colour: colour(e.callsign), label: `${e.callsign} ▸ ${e.target.anchor}` },
   })) })
+  const seen = showContacts.value ? contactsOnMap.value : []
+  map.getSource('contact-regions').setData({ type: 'FeatureCollection', features: seen.map((e) => ({
+    type: 'Feature', geometry: e.region, properties: { colour: sideOf(e.contact).colour },
+  })) })
+  map.getSource('contacts').setData({ type: 'FeatureCollection', features: seen.map((e) => ({
+    type: 'Feature', geometry: { type: 'Point', coordinates: e.centre },
+    properties: { icon: `ms:${sidc(e.contact, contactDoubt(e))}`, colour: sideOf(e.contact).colour,
+      label: `${describeContact(e.contact)}\n${live.value ? ago(e.t) + ' · ' : ''}${e.speaker ? 'seen by ' + e.speaker : 'reporter unknown'}` },
+  })) })
   map.getSource('custom').setData({ type: 'FeatureCollection', features: customPlaces.value.map((p) => ({
     type: 'Feature', geometry: { type: 'Point', coordinates: [p.lon, p.lat] }, properties: { label: p.name },
   })) })
 }
-watch([visible, callsigns, customPlaces, now, tasks], render)
+watch([visible, callsigns, customPlaces, now, tasks, showContacts], render)
 
 // --- map look: basemap, MGRS grid, night mode -----------------------------------------------------------------
 function updateGrid() {
@@ -181,7 +230,11 @@ function add(event) {
 function speak(e) {
   if (!readBack.value || !window.speechSynthesis || e.source?.startsWith('radio')) return   // the net would hear itself
   let msg
-  if (e.type === 'unidentified') msg = lang.value === 'fr' ? 'Station qui appelle, répétez votre indicatif.' : 'Station calling, say again your callsign.'
+  if (e.type === 'contact') {
+    const who = e.speaker || 'Station'
+    msg = e.ok ? `${who}, contact, ${describeContact(e.contact, { spoken: true })}, ${e.parsed?.relation === 'at' ? 'at' : (e.parsed?.relation || '').replaceAll('_', ' ')} ${e.anchor}.`
+      : `${who}, contact copied. Say again its location.`
+  } else if (e.type === 'unidentified') msg = lang.value === 'fr' ? 'Station qui appelle, répétez votre indicatif.' : 'Station calling, say again your callsign.'
   else if (e.ok) msg = `${e.callsign}, ${e.parsed?.relation === 'at' ? 'at' : (e.parsed?.relation || '').replaceAll('_', ' ')} ${e.anchor}`
   else if (e.type === 'intent') msg = `${e.callsign}, copy intention.`
   else msg = `${e.callsign}, say again. ${e.note || ''}`
@@ -432,7 +485,7 @@ onMounted(async () => {
   map.on('styleimagemissing', addSymbolImage)
   map.on('load', () => {
     const empty = { type: 'FeatureCollection', features: [] }
-    for (const id of ['regions', 'paths', 'labels', 'stale', 'custom', 'tasks', 'units', 'grid', 'grid-labels']) {
+    for (const id of ['regions', 'paths', 'labels', 'stale', 'custom', 'tasks', 'units', 'grid', 'grid-labels', 'contact-regions', 'contacts']) {
       map.addSource(id, { type: 'geojson', data: empty })
     }
     // MGRS kilometre grid under everything we draw, with 2-digit easting/northing labels at the edges.
@@ -452,6 +505,11 @@ onMounted(async () => {
       filter: ['!', ['get', 'ambiguous']], paint: outline })
     map.addLayer({ id: 'region-line-ambiguous', type: 'line', source: 'regions',
       filter: ['get', 'ambiguous'], paint: { ...outline, 'line-dasharray': [2, 2] } })
+    // Contacts: where the sighting could be, in the side's colour with a dashed edge, so it never reads as one of ours.
+    map.addLayer({ id: 'contact-fill', type: 'fill', source: 'contact-regions',
+      paint: { 'fill-color': ['get', 'colour'], 'fill-opacity': 0.18 } })
+    map.addLayer({ id: 'contact-line', type: 'line', source: 'contact-regions',
+      paint: { 'line-color': ['get', 'colour'], 'line-width': 1.5, 'line-dasharray': [3, 2] } })
     // Tasked destinations: dashed outline until the unit reports arriving.
     map.addLayer({ id: 'task-fill', type: 'fill', source: 'tasks', paint: { 'fill-color': ['get', 'colour'], 'fill-opacity': 0.12 } })
     map.addLayer({ id: 'task-line', type: 'line', source: 'tasks',
@@ -472,6 +530,13 @@ onMounted(async () => {
     map.addLayer({ id: 'label', type: 'symbol', source: 'labels',
       layout: { 'text-field': ['get', 'label'], 'text-size': 12, 'text-offset': [0, -2.6], 'text-max-width': 30,
         'text-font': ['Open Sans Semibold'], 'text-line-height': 1.25 },
+      paint: { 'text-color': ['get', 'colour'], 'text-halo-color': '#0b0d10', 'text-halo-width': 2 } })
+    // Sightings on top of everything: an enemy symbol must never hide under one of ours.
+    map.addLayer({ id: 'contact-icon', type: 'symbol', source: 'contacts',
+      layout: { 'icon-image': ['get', 'icon'], 'icon-allow-overlap': true, 'icon-ignore-placement': true } })
+    map.addLayer({ id: 'contact-label', type: 'symbol', source: 'contacts',
+      layout: { 'text-field': ['get', 'label'], 'text-size': 11, 'text-offset': [0, 2.4], 'text-max-width': 30,
+        'text-font': ['Open Sans Semibold'], 'text-line-height': 1.2 },
       paint: { 'text-color': ['get', 'colour'], 'text-halo-color': '#0b0d10', 'text-halo-width': 2 } })
     applyBasemap()
     updateGrid()
@@ -522,11 +587,14 @@ onUnmounted(() => {
         </div>
         <button type="button" class="chipbtn" :class="{ sel: showGrid }" :aria-pressed="showGrid" @click="showGrid = !showGrid">MGRS grid</button>
         <button type="button" class="chipbtn" :class="{ sel: night }" :aria-pressed="night" @click="night = !night">Night</button>
+        <button type="button" class="chipbtn" :class="{ sel: showContacts }" :aria-pressed="showContacts"
+          @click="showContacts = !showContacts">Contacts</button>
       </div>
       <div class="readout" title="MGRS under the cursor (1 m)">{{ cursorGrid }}</div>
       <div class="legend">
         <span><i class="frame"></i> report</span>
         <span><i class="frame dashed"></i> in doubt: ambiguous, callsign assumed, or silent 5 min</span>
+        <span v-for="l in LEGEND" :key="l.label"><i class="sym" v-html="l.svg"></i> {{ l.label }}</span>
       </div>
     </div>
     <aside>
@@ -628,7 +696,7 @@ onUnmounted(() => {
         <li v-for="e in [...visible].reverse()" :key="e.id"
           :class="{ bad: !e.ok && !e.identified_as && !['intent', 'order'].includes(e.type), amb: e.ambiguous, intent: ['intent', 'order'].includes(e.type), gone: e.superseded }">
           <div class="meta">
-            <b :style="{ color: colour(e.callsign) }">{{ e.callsign }}</b>
+            <b :style="{ color: isContact(e) ? sideOf(e.contact).colour : colour(e.callsign) }">{{ e.callsign }}</b>
             <span v-if="e.callsign_assumed" class="assumed" title="No callsign was said; taken from the Default callsign box">(assumed)</span>
             <span v-if="e.speaker && e.speaker !== e.callsign">via {{ e.speaker }}</span>
             <time>{{ clock(e.t) }}</time>
@@ -638,6 +706,7 @@ onUnmounted(() => {
             <span v-if="e.reached" class="tick">✓ arrived</span>
           </div>
           <div class="said">“{{ e.text }}”</div>
+          <div v-if="isContact(e)" class="contact" :style="{ color: sideOf(e.contact).colour }">⚠ {{ describeContact(e.contact) }}</div>
           <div v-if="e.ok" class="read">→ {{ (e.parsed?.relation || '').replaceAll('_', ' ') }} <b>{{ e.anchor }}</b> · ±{{ e.radius_m }} m
             <span class="gridref">{{ mgrsAt(e.centre, { radius: e.radius_m }) }}</span></div>
           <div v-if="e.superseded" class="note">corrected by a later report</div>
@@ -676,6 +745,8 @@ body { margin: 0; font: 14px/1.4 system-ui, sans-serif; color: var(--text); back
   background: rgba(11, 13, 16, 0.88); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; max-width: 230px; }
 .legend span { display: flex; gap: 6px; align-items: center; }
 .legend .frame { width: 16px; height: 11px; flex: none; background: #80e0ff; border: 1.5px solid #000; box-sizing: border-box; }
+.legend .sym { display: inline-flex; width: 16px; justify-content: center; flex: none; }
+.contact { font-weight: 600; }
 .legend .frame.dashed { border: 1.5px dashed #000; outline: 1px solid #80e0ff; background: transparent; }
 .maplibregl-ctrl-attrib { background: rgba(11, 13, 16, 0.7) !important; color: var(--muted); }
 .maplibregl-ctrl-attrib a { color: var(--muted) !important; }

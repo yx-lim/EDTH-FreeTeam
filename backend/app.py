@@ -207,7 +207,8 @@ async def confirm(event_id: int) -> dict:
 def export() -> dict:
     """Current picture and track history as GeoJSON, for any GIS or C2 tool."""
     features = [{"type": "Feature", "geometry": e["region"],
-                 "properties": {k: e.get(k) for k in ("id", "t", "callsign", "text", "anchor", "radius_m", "ambiguous", "note")}}
+                 "properties": {k: e.get(k) for k in ("id", "t", "callsign", "type", "contact", "speaker", "text", "anchor",
+                                                     "radius_m", "ambiguous", "note")}}
                 for e in tracker.events if e.get("ok") and not e.get("superseded")]
     return {"type": "FeatureCollection", "features": features}
 

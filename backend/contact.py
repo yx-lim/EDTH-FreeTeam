@@ -1,0 +1,120 @@
+"""Contact reports: what a unit sees, not where it is. "Contact, two enemy tanks, moving north, 300 metres east of
+the church" -> one report of type "contact" with {what, side, count, activity, heading} and the usual anchor fields.
+
+Shaped like the SALUTE report soldiers are taught (Size, Activity, Location, Unit, Time, Equipment).
+
+Safety rule: the side is "hostile" only when the speaker says so ("enemy", "hostile"). Anything else is "unknown"
+(yellow on the map), because a misheard word must never paint a friendly unit as a target.
+"""
+from __future__ import annotations
+
+import re
+
+WHATS = ["infantry", "sniper", "tank", "apc", "vehicle", "artillery", "drone", "helicopter", "aircraft", "ied", "civilians",
+         "unknown"]
+# Threats named on their own are a sighting ("IED behind the town hall"); "vehicle" or "infantry" alone are not.
+_ALWAYS = {"tank", "apc", "drone", "helicopter", "aircraft", "artillery", "ied", "sniper", "civilians"}
+SIDES = ["hostile", "unknown", "friendly", "neutral"]
+ACTIVITIES = ["moving", "static", "firing", None]
+
+# Order matters: the first match wins ("armoured vehicle" is an apc, not a vehicle; "mortar fire" is artillery).
+_WHAT = [
+    ("apc", r"apcs?|ifvs?|bmps?|btrs?|armou?red (?:vehicles?|cars?|personnel carriers?)|blindes?|vbci"),
+    ("tank", r"tanks?|chars?(?: d assaut)?|armou?r|t ?(?:64|72|80|90)s?|mbts?"),
+    ("drone", r"drones?|uavs?|quadcopters?|fpvs?|shaheds?|lancets?"),
+    ("helicopter", r"helicopters?|helos?|choppers?|helicopteres?"),
+    ("aircraft", r"aircraft|planes?|jets?|avions?"),
+    ("artillery", r"artillery|mortars?|shelling|rockets?|grads?|artillerie|mortiers?|obus"),
+    ("ied", r"ieds?|mines?|bombs?|explosives?|booby traps?|engins? explosifs?|mines? antichars?"),
+    ("sniper", r"snipers?|tireurs? d elite"),
+    ("vehicle", r"vehicles?|trucks?|technicals?|pick ?ups?|vehicules?|camions?"),
+    ("infantry", r"infantry|troops|soldiers|personnel|squad|platoon|dismounts?|fantassins?|soldats?|combattants?"),
+    ("civilians", r"civilians?|refugees?|civils?|crowd|foule|refugies?"),
+]
+WHAT_RE = "|".join(f"(?P<{k}>\\b(?:{v})\\b)" for k, v in _WHAT)
+
+_HOSTILE = r"\b(?:enemy|enemies|hostiles?|opfor|ennemis?|hostiles?|adverses?)\b"
+_FRIENDLY = r"\b(?:friendly|friendlies|own forces|blue forces?|amis?|forces amies)\b"
+_NEUTRAL = r"\b(?:civilians?|civils?|neutral|neutres?|refugees?|refugies?)\b"
+# Words that make a clause a sighting even before the equipment is named.
+_TRIGGER = r"\b(?:contact|spotted|sighted|spot|observe[ds]?|observing|seen|i see|we see|i can see|we can see|enemy|enemies|hostiles?|ennemis?|incoming|repere|reperes|vu|vus|on voit|je vois)\b"
+_MOVING = r"\b(?:moving|heading|driving|flying|advancing|going|travelling|traveling|se deplacent|se dirige(?:nt)?|avancent?|roulent?)\b"
+_STATIC = r"\b(?:static|stationary|parked|dug in|not moving|hovering|immobiles?|a l arret|retranches?)\b"
+_FIRING = r"\b(?:firing|shooting|engaging|attacking|under fire|taking fire|incoming|tirent|tire|ouvrent le feu|sous le feu)\b"
+_HEADING = (r"\b(?:towards? (?:the )?|to the |vers le |vers l |au |a l )?(?P<h>northeast|northwest|southeast|southwest|north|south|east|west"
+            r"|nord est|nord ouest|sud est|sud ouest|nord|sud|est|ouest)(?:wards?)?\b")
+_FR_DIRS = {"nord": "north", "sud": "south", "est": "east", "ouest": "west", "nord est": "northeast",
+            "nord ouest": "northwest", "sud est": "southeast", "sud ouest": "southwest"}
+# "300 metres east of me": the reporter is the reference point.
+SELF = r"(?:me|us|my position|our position|my location|moi|nous|ma position|notre position)"
+
+
+def starts_contact(clause: str) -> bool:
+    """Does this clause begin a sighting? Needs the equipment plus a trigger word, a side word or a count
+    ("two tanks"), so "I'm at the car park" or "the tank museum" alone do not count."""
+    m = re.search(WHAT_RE, clause)
+    if re.search(r"\bcontact\b|\bincoming\b", clause) or (m and m.lastgroup in _ALWAYS):
+        return True
+    return m is not None and bool(re.search(_TRIGGER, clause) or re.search(_HOSTILE, clause) or re.search(_NEUTRAL, clause)
+                             or re.search(rf"\b(?:\d+|a|an|one|two|three|four|five|six|ten|several|multiple|plusieurs|un|une|deux|trois|quatre)\s+(?:\w+\s+)?(?:{WHAT_RE})", clause))
+
+
+def describe(clauses: list[str], number) -> dict:
+    """What, side, count, activity and heading from the clauses of one sighting."""
+    text = " , ".join(clauses)
+    m = re.search(WHAT_RE, text)   # the first thing named; at one spot, the earlier entry in _WHAT wins
+    what = m.lastgroup if m else "artillery" if re.search(r"\bincoming\b", text) else "unknown"
+    side = ("hostile" if re.search(_HOSTILE, text) else "neutral" if re.search(_NEUTRAL, text)
+            else "friendly" if re.search(_FRIENDLY, text) else "unknown")
+    count = None
+    m = re.search(rf"(?P<n>\d+|\b(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|twelve|twenty|un|une|deux|trois|quatre|cinq|six|dix)\b)"
+                  rf"\s+(?:(?:enemy|hostile|ennemis?|enemies|civilian|armou?red|light|heavy|small|large|\w+)\s+)?(?:{WHAT_RE})", text)
+    if m:
+        count = number(m.group("n"))
+    activity = "firing" if re.search(_FIRING, text) else "static" if re.search(_STATIC, text) else \
+        "moving" if re.search(_MOVING, text) else None
+    heading = None
+    if activity == "moving" or re.search(_MOVING, text):
+        hm = re.search(_MOVING + r"\s+" + _HEADING, text)
+        if hm:
+            heading = _FR_DIRS.get(hm.group("h"), hm.group("h"))
+    return {"what": what, "side": side, "count": int(count) if count else None, "activity": activity, "heading": heading}
+
+
+def location_clauses(clauses: list[str]) -> list[str]:
+    """Clauses that may say where the contact is, with the description words removed, so "moving north" is not
+    read as "north of" and "towards the bridge" is not read as the contact's position."""
+    out = []
+    for c in clauses:
+        c = re.sub(_MOVING + r"\s+" + _HEADING, " ", c)
+        c = re.sub(_MOVING + r"\s+(?:towards?|to|vers)\s+.*", " ", c)   # a destination, not where it is now
+        c = re.sub(r"\b(?:contact|spotted|sighted|observed|i see|we see|i can see|we can see|repere|on voit|je vois)\b", " ", c)
+        c = re.sub(r"\s+", " ", c).strip(" ,")
+        if c:
+            out.append(c)
+    return out
+
+
+def self_anchor(report: dict, speaker: str | None) -> dict:
+    """"300 metres east of me" -> anchored on the reporter's own last position."""
+    a = report.get("anchor") or {}
+    if a.get("name") and re.fullmatch(SELF, a["name"]):
+        report["anchor"] = {"name": speaker or "me", "kind": "unit"}
+        report["relative_to_reporter"] = True
+    return report
+
+
+def validate(c: dict | None) -> dict:
+    c = c if isinstance(c, dict) else {}
+    out = {
+        "what": c.get("what") if c.get("what") in WHATS else "unknown",
+        "side": c.get("side") if c.get("side") in SIDES else "unknown",
+        "activity": c.get("activity") if c.get("activity") in ACTIVITIES else None,
+        "heading": c.get("heading") if c.get("heading") in
+        ("north", "south", "east", "west", "northeast", "northwest", "southeast", "southwest") else None,
+    }
+    try:
+        out["count"] = int(c["count"]) if c.get("count") is not None else None
+    except (TypeError, ValueError):
+        out["count"] = None
+    return out

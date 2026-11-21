@@ -70,6 +70,24 @@ Try it without a radio:
 Audio needs server speech-to-text (a Mistral key or faster-whisper). Without one, recordings are still cut into
 transmissions but not transcribed, and **Listen to the net** falls back to the browser's own continuous recogniser.
 
+## Contact reports
+
+Soldiers can report what they see, not just where they are: *"Zero, this is Bravo one, contact, two enemy tanks,
+moving north, 300 metres east of the church, over."* `backend/contact.py` reads what (infantry, sniper, tank, armoured
+vehicle, vehicle, artillery, drone, helicopter, aircraft, IED, civilians), which side, how many, and whether it is moving
+(and which way), static or firing. A sighting becomes its own track (`contact 1`, `contact 2`…) and never moves a
+friendly unit. "200 metres north of me" is measured from the reporter's latest position.
+
+| Said | Plotted as |
+|---|---|
+| "enemy" / "hostile" | red diamond (APP-6 hostile) |
+| no side said | yellow quatrefoil: side unknown. Never assumed hostile, so a misheard word cannot paint a friend as a target |
+| "civilians" | green square (neutral) |
+
+The frame shape, not only the colour, carries the side, so it still reads in night mode and for colour-blind users.
+A single report is dashed until the duty officer confirms it; contacts then fade by type (a drone after 3 minutes,
+vehicles and troops after 15, an IED after a day). The **Contacts** button hides or shows them.
+
 ## What it understands
 
 | Spoken | Result |

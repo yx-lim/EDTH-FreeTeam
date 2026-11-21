@@ -40,28 +40,59 @@ class Tracker:
         now = time.time() if now is None else now
         t0 = time.perf_counter()
         parsed = parsed or await extract(text)
+        # Sightings (enemy, drones, IEDs...) are not anyone's position: they are tracked apart from the units.
+        contacts = [r for r in parsed["reports"] if r["type"] == "contact"]
+        own = [r for r in parsed["reports"] if r["type"] != "contact" and not (contacts and r["type"] == "other")]
         named = bool(speaker or parsed["speaker"])
-        if not named and all(r["type"] == "other" for r in parsed["reports"]):
+
+        def stamp(event: dict, **more) -> dict:
+            event.update(source=source, extractor=parsed.get("extractor"), transcript_meta=stt, **(extra or {}), **more,
+                         latency_ms={"stt": (stt or {}).get("stt_ms"), "extract": parsed.get("extract_ms"),
+                                     "total": round((time.perf_counter() - t0) * 1000) + ((stt or {}).get("stt_ms") or 0)})
+            self._write({"kind": "event", **self.public(event)})
+            return event
+
+        if not named and not contacts and all(r["type"] == "other" for r in own):
             return []   # chatter ("hello hello"): no callsign, no place, no procedure. Nothing to log or plot.
         if not named and not default_callsign:
-            return [self._hold(text, parsed, now, source, stt)]
+            # An enemy tank at the church is worth plotting whoever saw it; the reporter's own position is held.
+            out = [stamp(self._contact(r, None, text, now)) for r in contacts]
+            if any(r["type"] != "other" for r in own) or not contacts:
+                out.append(self._hold(text, {**parsed, "reports": own}, now, source, stt))
+            return out
         held = self.pending if self.pending and now - self.pending["t"] <= HOLD_S else None
         if held and speaker is None and parsed["speaker"] and all(r["type"] == "other" for r in parsed["reports"]):
             return await self._claim(held, parsed["speaker"], now, source, stt)   # push-to-talk only; the net has its own
         speaker = speaker or parsed["speaker"] or (norm(default_callsign) if default_callsign else None) or "unit 1"
         by_subject: dict[str, list[dict]] = {}
-        for r in parsed["reports"]:
+        for r in own:
             by_subject.setdefault(r.get("subject") or speaker, []).append(r)
         out = []
         for subject, reports in by_subject.items():
             event = self._apply(subject, speaker, reports, text, now, replaces if subject == speaker else None)
-            event.update(source=source, extractor=parsed.get("extractor"), transcript_meta=stt, **(extra or {}),
-                         callsign_assumed=not named and subject == speaker,
-                         latency_ms={"stt": (stt or {}).get("stt_ms"), "extract": parsed.get("extract_ms"),
-                                     "total": round((time.perf_counter() - t0) * 1000) + ((stt or {}).get("stt_ms") or 0)})
-            self._write({"kind": "event", **event})
-            out.append(event)
-        return out
+            out.append(stamp(event, callsign_assumed=not named and subject == speaker))
+        # After the speaker's own position, so "200 m north of me" is measured from where they say they are now;
+        # listed first, because a sighting matters more than a position update.
+        return [stamp(self._contact(r, speaker, text, now), callsign_assumed=not named) for r in contacts] + out
+
+    def _contact(self, report: dict, reporter: str | None, text: str, now: float) -> dict:
+        """A sighting becomes its own track ("contact 3"), never a fix in any unit's history."""
+        units = self.units()
+        n = 1 + sum(e.get("type") == "contact" for e in self.events)
+        event = {"id": len(self.events) + 1, "t": now, "callsign": f"contact {n}", "speaker": reporter, "text": text,
+                 "parsed": report, "type": "contact", "contact": report.get("contact"), "ok": False, "superseded": False}
+        if report.get("relative_to_reporter") and (reporter is None or reporter not in units):
+            result = {"ok": False, "note": "located relative to the reporter, whose own position is not known yet; "
+                                           "say again with a place or grid"}
+        elif not (report.get("anchor") or {}).get("name"):
+            result = {"ok": False, "note": "no location for the contact; say again where it is"}
+        else:
+            # The reporter's position is the viewpoint ("behind the town hall" as seen from them). No walking-speed
+            # check: a drone or a tank is not limited by how far a soldier can walk.
+            result = resolve(report, self.gaz, last=units.get(reporter) if reporter else None, units=units)
+        event.update({k: v for k, v in result.items() if k != "_geom"})
+        self.events.append(event)
+        return event
 
     def _hold(self, text: str, parsed: dict, now: float, source: str, stt: dict | None) -> dict:
         """A report with no callsign and no default to fall back on: plotting it on a guessed unit would put a team
@@ -235,6 +266,6 @@ class Tracker:
             elif kind == "event" and "id" in line:
                 line["id"] = len(self.events) + 1
                 self.events.append(line)
-                if line.get("ok") and line.get("region") and not line.get("superseded"):
+                if line.get("ok") and line.get("region") and not line.get("superseded") and line.get("type") != "contact":
                     geom = self.gaz.proj.to_xy(shape(line["region"]))
                     self.history.setdefault(line["callsign"], []).append((line["id"], geom, line["t"]))
