@@ -165,50 +165,65 @@ sentences (ideally with Lysk) and mark their truth points on a map before quotin
 
 ## Built
 
-Updated after each major implementation; newest last.
+What this repo can do now, grouped by area. Updated after each major implementation.
 
-- **Radio-net mode:** listens to a whole channel with no button presses, cuts it into transmissions (voice-activity
-  detection) and works out the speaker from radio procedure and conversation order.
-- **Push-to-talk, made reliable:** one press sends one report; a report with no callsign gets "say again your
-  callsign" instead of a guess; no read-back echo; lost, stuck and leaked transmissions fixed, with a tested state machine.
-- **Offline speech-to-text:** local Whisper with no internet (audio decoding fixed, model preloaded).
-- **Military map look:** NATO symbols, MGRS grid, dark, satellite and topo base maps, a confirm step before plotting.
-- **Spoken grid references:** grids read out loud are plotted directly; a full stop between numbers counts as a pause.
-- **Ukrainian/Russian:** codenames with case endings ("від Сараю" → Сарай), one callsign table across spellings,
-  Cyrillic aliases, Ukrainian/Russian radio procedure and rule-based reports, a Ukrainian demo net.
-- **Contact reports:** enemy, unknown and civilian sightings with APP-6 frames; repeat sightings merge; nearby units
-  are warned; contacts fade by type.
-- **Team app patch:** `integrations/` adds spoken grid references to the team's React/Gemini app (for Sarthak to apply).
+### 1. Hearing the radio
+- **Push-to-talk**: hold Space (or the button), speak, release.
+  - One press sends exactly one report; background chatter is ignored.
+  - No callsign heard → the app replies "say again your callsign" instead of plotting an unknown unit.
+  - The read-back plays only on the screen that sent the report, so it doesn't echo.
+  - Fixed transmissions getting lost, stuck, or leaking into the next one (covered by tests).
+- **Radio-net mode**: listens to a whole radio channel with nobody pressing anything.
+  - Voice-activity detection cuts the channel into separate transmissions.
+  - Works out who is talking from radio procedure ("Zero, this is Alpha two…") and from who was just called.
+  - Transmissions it can't tie to anyone are logged, never plotted.
+- **Offline speech-to-text**: local Whisper runs with no internet, so the demo survives bad Wi-Fi.
+
+### 2. Understanding Ukrainian and Russian
+- Ukrainian, Russian and mixed reports work in the language model, the speech-to-text and the UI.
+- Codenames are found whatever their case ending: "від Сараю", "на Сараї" → Сарай.
+- One unit whatever the spelling: Граніт (UA) = Гранит (RU).
+- Radio procedure: "Вежа, я Сокіл… прийом", corrections ("мінус", "отставить").
+- A rule-based fallback when no language model is available, and a Ukrainian demo net to replay.
+
+### 3. Reporting what soldiers see (contacts)
+- "Contact, two enemy tanks, moving north, 300 m east of the church" becomes its own marker; it never moves a friendly unit.
+- NATO (APP-6) frames: red diamond = enemy, yellow = side unknown (never assumed enemy), green = civilians.
+- Drone slang (ждун, мопед, пташка), counts ("два мавіки"), headings, "ще один" (= a new drone), and relayed reports.
+- The same thing seen twice is merged into one marker instead of two.
+- Units nearby are warned ("FPV at your position").
+- Markers fade by type: a drone after 3 min, vehicles and troops after 15 min, an IED after a day.
+
+### 4. Positions and grids
+- Grid references read out loud ("three one uniform…") place a report directly, for own units and contacts.
+- Military map look: NATO symbols, MGRS grid overlay, dark, satellite and topo base maps.
+- A confirm step before an unconfirmed report goes on the map.
+
+### 5. For the team app (Sarthak's repo)
+- `integrations/` holds a patch that adds spoken grid references to the React/Gemini app. **Sarthak needs to apply it.**
 
 ## Not done yet
 
-From research and the debate panel (21 Nov):
+**Must fix**
+- Team app: old threats never leave its map (it draws from the event list, not the merged sightings).
+- Speech-to-text has not been tested on real radio-quality Ukrainian audio yet. Compare ElevenLabs Scribe, Gemini and
+  gpt-4o-transcribe on degraded recordings and score callsigns, places and numbers. (Skip Voxtral: no Ukrainian.)
 
-- **Speech-to-text comparison:** ElevenLabs Scribe v3 vs Gemini vs gpt-4o-transcribe on radio-degraded audio
-  (`radio_effect.py`: narrow band, codec, noise, clipped first syllable). Score callsign, landmark and number accuracy,
-  not word error rate. Don't use Voxtral for Ukrainian (not listed).
-- **Team app bug:** stale threats never leave the map (it draws from the event list, not the fuser's state).
-- **Static hazards** (mines, cables, waiting drones) never auto-delete: they turn "unconfirmed, N h old".
-  No growing circles for fast movers; a direction arrow only when a heading is given.
-- **Misheard place:** show two candidate places for the officer to pick; read-back is suggested, never automatic.
-  Corroboration shrinks a circle only for independent reports, not relays.
-- **Calibration:** "truth inside the circle X of 20", labelled synthetic data.
-- **Duty-officer confirm queue:** radio call → pre-filled card → one key → map and NATO-format export.
-- **Landmarks by voice** ("позначка: спалений танк") and a dated code table (codenames change daily).
-- **Casualty card** built from 200/300 reports across several transmissions; strength shown as "last reported N, age X".
-- **Friendly drone corridors:** a time-limited corridor that warns nearby infantry.
-- **Route threats** for evacuation and supply: "last report X min ago", never coloured green or called safe.
-- **Lore-log adapter:** read a Lore-style log (time, speaker, text) and build the map and cards from it.
-- **Don't claim** Delta integration, a front-line accuracy percentage, or that Lore lacks Ukrainian.
+**Make the map more honest**
+- Mines, cables and waiting drones should turn "unconfirmed" instead of disappearing.
+- A misheard place should show two candidate places for the officer to pick.
+- Measure "truth was inside the circle X of 20" for the pitch slide.
 
-Earlier gaps:
+**Next features (by value)**
+1. Duty-officer confirm queue: radio call → pre-filled card → one key → map and NATO export.
+2. Name landmarks by voice ("позначка: спалений танк") and load a daily code table.
+3. Casualty card from 200/300 reports.
+4. Friendly drone corridors, so infantry don't jam or shoot our own drones.
+5. Reported threats along a route ("last report 5 min ago", never called safe).
+6. Read a Lore-style log and build the map from it.
 
-- Streaming speech-to-text (Voxtral realtime over WebSocket).
-- Radio-net transcription on real radio audio: the cutting, attribution and endpoints are tested, but speech-to-text on
-  radio-quality audio has not been run yet (no key or model here). Speaker diarisation is not used; attribution relies on procedure.
-- Tap-to-pick among ambiguous places; spoken confirmation loop beyond read-back.
-- Object-centric "behind / in front of" (entrance side of a building); now read from the unit's last position and flagged.
-- Offline map tiles (PMTiles), Cursor-on-Target export for ATAK.
-- The Mistral extraction prompt and Voxtral call are written to the documented API but untested until a key is added.
+**Later**: streaming speech-to-text, offline map tiles, ATAK export, "in front of" by building entrance.
+
+**Don't claim** Delta integration, a real front-line accuracy %, or that Lore can't do Ukrainian.
 
 Map data © OpenStreetMap contributors, ODbL. The public OSM tile server is fine for development only.
