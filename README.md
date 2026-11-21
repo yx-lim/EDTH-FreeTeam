@@ -38,12 +38,9 @@ keys everything runs offline apart from the map tiles: a rule-based extractor (E
 grammar) and local Whisper (`pip install faster-whisper`) or the browser's speech recognition. If a cloud call fails,
 the report still goes through the rules, so the map never stops.
 
-**Ukrainian demo (Irpin).** Run the backend on the Irpin zone instead of Paris; the map, codenames, demo nets and
-logs switch to `data/zones/irpin/`, and the app opens in Ukrainian:
-
-```bash
-ZONE=irpin .venv/bin/uvicorn backend.app:app --reload --port 8000
-```
+**Ukrainian demo (Irpin).** Pick **Ірпінь (Irpin)** in the zone dropdown under the title. The map, codenames, demo
+nets and logs switch to `data/zones/irpin/` on every open screen, and the app turns to Ukrainian; pick Paris to go
+back (each zone keeps its own picture). To start on Irpin: `ZONE=irpin .venv/bin/uvicorn backend.app:app --port 8000`.
 
 Then **Radio net → Replay demo net** (Ukrainian/Russian net; switch the language to EN for the English one), or say
 `Вежа, я Сокіл, двісті метрів на північ від Центрального ринку, прийом`. Accuracy:
@@ -168,7 +165,7 @@ is silent. The event log (`data/events.jsonl`) is replayed on restart.
 | `backend/stt.py` | Speech-to-text, switchable at run time (`GET/POST /stt`): ElevenLabs Scribe, Gemini, Voxtral with place-name vocabulary (`context_bias`), or local faster-whisper |
 | `backend/net.py` | Radio-net mode: split at "over"; speaker, addressee and kind (report, request, order, ack, say again, radio check); acks, repeats, taskings |
 | `backend/vad.py`, `frontend/src/vad.js` | Energy voice-activity detection that cuts a channel into transmissions (server for recordings, browser live) |
-| `backend/app.py` | FastAPI: `POST /report`, `POST /audio`, `POST /net/text`, `POST /net/audio`, `POST /net/recording`, `POST /net/replay`, `GET /state`, `GET/POST /stt`, `POST /places`, `POST /events/{id}/confirm`, `POST /events/{id}/reject`, `GET /picture.nvg`, `GET /picture.geojson`, `GET /export.geojson`, `POST /reset`, `WS /ws` |
+| `backend/app.py` | FastAPI: `POST /report`, `POST /audio`, `POST /net/text`, `POST /net/audio`, `POST /net/recording`, `POST /net/replay`, `GET /state`, `GET/POST /stt`, `POST /zone`, `POST /places`, `POST /events/{id}/confirm`, `POST /events/{id}/reject`, `GET /picture.nvg`, `GET /picture.geojson`, `GET /export.geojson`, `POST /reset`, `WS /ws` |
 | `data/aliases.json` | Spoken names to OSM names; also sent to speech-to-text as vocabulary |
 | `data/demo_net.jsonl`, `scripts/make_demo_net.py` | Scripted demo net, and a synthetic radio recording of it |
 | `scripts/fetch_district.py` | Rebuild `data/gazetteer.json` for any bounding box |
@@ -225,7 +222,7 @@ What this repo can do now, grouped by area. Updated after each major implementat
 - One unit whatever the spelling: Граніт (UA) = Гранит (RU).
 - Radio procedure: "Вежа, я Сокіл… прийом", corrections ("мінус", "отставить").
 - A rule-based fallback when no language model is available, and a Ukrainian demo net to replay.
-- **A Ukrainian zone: Irpin** (`ZONE=irpin`, `data/zones/irpin/`): 250 places over 3 x 3 km from OpenStreetMap, named in
+- **A Ukrainian zone: Irpin** (zone dropdown or `ZONE=irpin`, `data/zones/irpin/`): 250 places over 3 x 3 km from OpenStreetMap, named in
   Ukrainian, with invented codenames, spoken aliases (UA/RU/EN), a Ukrainian/Russian and an English demo net.
 - **Ukrainian at the English level**: Cyrillic place names go through the full matcher (case endings, street said
   without "вулиця", Russian forms such as "улица Шевченко", fuzzy and sound-alike), "біля церкви" by category, Latin

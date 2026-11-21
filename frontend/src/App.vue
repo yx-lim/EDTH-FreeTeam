@@ -66,7 +66,15 @@ const customPlaces = ref([])
 const text = ref('')
 const callsign = ref('alpha 1')
 const lang = ref('en')
-const zone = ref(null)   // {name, label, lang}: the area of operations the backend runs on (ZONE=...)
+const zone = ref(null)   // {name, label, lang}: the area of operations the backend runs on
+const zones = ref([])    // every zone with map data (Paris, Irpin, ...)
+// Switch the area of operations on the server; every open screen reloads onto it (map, events and nets differ).
+async function chooseZone(name) {
+  if (name === zone.value?.name) return
+  const r = await fetch('/api/zone', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) })
+  if (r.ok) location.reload()
+  else heard.value = (await r.json().catch(() => ({}))).detail || 'could not switch zone'
+}
 // Speech language: the browser recogniser, read-back voice and server speech-to-text hint. Auto lets the server decide.
 const SPEECH_LANG = { en: 'en-GB', fr: 'fr-FR', uk: 'uk-UA', ru: 'ru-RU', auto: 'en-GB' }
 const readBack = ref(true)
@@ -546,6 +554,7 @@ function connect() {
       if (e) { e.superseded = true; events.value = [...events.value] }
     }
     if (msg.type === 'places') customPlaces.value = msg.places
+    if (msg.type === 'zone' && msg.zone?.name !== zone.value?.name) location.reload()   // switched on another screen
     if (msg.type === 'stt') { serverStt.value = msg.provider; sttOptions.value = msg.available }
     if (msg.type === 'tx') txs.value.push(msg.tx)
     if (msg.type === 'annotate') {
@@ -562,6 +571,7 @@ onMounted(async () => {
   serverStt.value = state?.stt ?? null
   sttOptions.value = state?.stt_options ?? []
   zone.value = state?.zone ?? null
+  zones.value = state?.zones ?? []
   if (zone.value?.lang && zone.value.name !== 'paris') lang.value = zone.value.lang   // e.g. Irpin: Ukrainian
   customPlaces.value = state?.custom_places ?? []
   map = new maplibregl.Map({
@@ -702,7 +712,12 @@ onUnmounted(() => {
     </div>
     <aside>
       <header>
-        <h1>Voice-to-Map <span v-if="zone" class="zone">{{ zone.label }}</span></h1>
+        <h1>Voice-to-Map
+          <select v-if="zones.length > 1" class="zone" :value="zone?.name" title="Area of operations"
+            @change="chooseZone($event.target.value)">
+            <option v-for="z in zones" :key="z.name" :value="z.name">{{ z.label }}</option>
+          </select>
+          <span v-else-if="zone" class="zone">{{ zone.label }}</span></h1>
         <span class="status">{{ status }} · speech:
           <select v-if="sttOptions.length" class="stt" :value="serverStt || 'none'" title="Speech-to-text"
             @change="chooseStt($event.target.value)">
@@ -900,6 +915,7 @@ header { display: flex; justify-content: space-between; align-items: baseline; g
 h1 { font-size: 15px; margin: 0; letter-spacing: 0.08em; text-transform: uppercase; }
 .status { color: var(--muted); font-size: 12px; text-align: right; }
 h1 .zone { display: block; font-size: 11px; font-weight: 400; color: var(--muted); }
+h1 select.zone { margin-top: 3px; padding: 1px 4px; color: var(--text); }
 .status select.stt { padding: 1px 4px; font-size: 12px; }
 form { display: grid; gap: 8px; }
 textarea, input.callsign, select, input.wide { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;

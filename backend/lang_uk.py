@@ -205,6 +205,13 @@ def _load_callsigns() -> dict[str, list[str]]:
 _CALLSIGNS = _load_callsigns()
 
 
+def reload_callsigns() -> None:
+    """After a zone switch: that zone's callsign table, else the shared one."""
+    global CALLSIGNS, _CALLSIGNS
+    CALLSIGNS = zone.path("callsigns.json", shared=True)
+    _CALLSIGNS = _load_callsigns()
+
+
 # NATO letters said in Cyrillic, mapped to the Latin callsign so "Альфа 1" and "Alpha 1" are one unit.
 _NATO_CYR = {fold(k): v for k, v in {
     "альфа": "alpha", "браво": "bravo", "чарлі": "charlie", "чарли": "charlie", "дельта": "delta", "ехо": "echo",

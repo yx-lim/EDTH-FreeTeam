@@ -24,8 +24,6 @@ from .tracker import Tracker  # noqa: E402
 
 from . import zone  # noqa: E402
 
-DATA = zone.DIR      # data/ for Paris, data/zones/<name>/ otherwise: each zone keeps its own logs
-LOG = DATA / "events.jsonl"
 
 app = FastAPI(title="Voice-to-Map")
 
@@ -37,9 +35,24 @@ async def _warm_speech_to_text() -> None:
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-gaz = Gazetteer()
-tracker = Tracker(gaz, log=LOG)   # replays data/events.jsonl, so a restart keeps the picture
-net = Net(tracker, log=DATA / "net.jsonl")   # radio-net mode: every transmission heard on the channel
+# One map, tracker and radio log per zone, loaded the first time the zone is used and kept, so switching back and
+# forth loses nothing. The module globals gaz / tracker / net / DATA always point at the current zone.
+_zones: dict[str, tuple[Gazetteer, Tracker, Net]] = {}
+
+
+def use_zone(name: str) -> None:
+    global gaz, tracker, net, DATA
+    zone.switch(name)
+    DATA = zone.DIR      # data/ for Paris, data/zones/<name>/ otherwise: each zone keeps its own logs
+    if name not in _zones:
+        g = Gazetteer(DATA / "gazetteer.json", aliases=DATA / "aliases.json", custom=DATA / "custom_places.json",
+                      codenames=DATA / "codenames.json")
+        t = Tracker(g, log=DATA / "events.jsonl")   # replays the zone's log, so a restart keeps the picture
+        _zones[name] = (g, t, Net(t, log=DATA / "net.jsonl"))   # radio-net mode: every transmission heard
+    gaz, tracker, net = _zones[name]
+
+
+use_zone(zone.NAME)
 clients: set[WebSocket] = set()
 replay_task: asyncio.Task | None = None
 
@@ -184,7 +197,25 @@ def state() -> dict:
     return {"centre": [gaz.proj.lon0, gaz.proj.lat0], "bbox": gaz.bbox, "places": len(gaz.places),
             "events": [tracker.public(e) for e in tracker.events], "custom_places": gaz.custom(),
             "transmissions": net.transmissions[-500:], "stt": stt.provider(), "stt_options": stt.available(),
-            "zone": zone.info()}
+            "zone": zone.info(), "zones": [zone.info(z) for z in zone.available()]}
+
+
+class ZoneChoice(BaseModel):
+    name: str
+
+
+@app.post("/zone")
+async def zone_set(body: ZoneChoice) -> dict:
+    """Switch the area of operations while running (paris | irpin | ...). Every open map reloads onto it."""
+    global replay_task
+    if replay_task and not replay_task.done():
+        replay_task.cancel()   # a demo net belongs to the zone it was started in
+    try:
+        use_zone(body.name)
+    except ValueError as err:
+        raise HTTPException(400, str(err)) from err
+    await broadcast({"type": "zone", "zone": zone.info()})
+    return zone.info()
 
 
 class SttChoice(BaseModel):
