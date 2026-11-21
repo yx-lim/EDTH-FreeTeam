@@ -87,3 +87,81 @@ def test_contacts_survive_restart_without_becoming_units(tmp_path):
     run(t.ingest("Zero, this is Bravo one, contact, enemy tank at the Saint-Sulpice church", now=0))
     r = Tracker(gaz, log=log)
     assert r.events[0]["type"] == "contact" and r.events[0]["ok"] and r.units() == {}
+
+
+# --- tracks: merging repeat sightings, warning nearby units ---------------------------------------------------
+
+TANK_AT_CHURCH = "contact, enemy tank at the Saint-Sulpice church"
+
+
+def test_two_stations_seeing_one_tank_make_one_corroborated_contact():
+    t = Tracker(gaz)
+    [a] = run(t.ingest(f"Zero, this is Alpha two, {TANK_AT_CHURCH}", now=0))
+    [b] = run(t.ingest("Zero, this is Bravo one, contact, enemy tank near the Saint-Sulpice church", now=60))
+    assert a["callsign"] == b["callsign"] == "contact 1" and b["merged_with"] == a["id"]
+    assert b["seen_by"] == ["alpha 2", "bravo 1"] and b["corroborated"] and not a["corroborated"]
+
+
+def test_different_things_or_places_stay_separate():
+    t = Tracker(gaz)
+    run(t.ingest(f"Zero, this is Alpha two, {TANK_AT_CHURCH}", now=0))
+    [drone] = run(t.ingest("Zero, this is Bravo one, contact, enemy drone at the Saint-Sulpice church", now=10))
+    [far] = run(t.ingest("Zero, this is Bravo one, contact, enemy tank at the Medici fountain", now=20))
+    assert drone["callsign"] == "contact 2" and far["callsign"] == "contact 3"
+
+
+def test_old_sighting_is_not_merged():
+    t = Tracker(gaz)
+    run(t.ingest("Zero, this is Alpha two, contact, enemy drone at the Saint-Sulpice church", now=0))
+    [later] = run(t.ingest("Zero, this is Bravo one, contact, enemy drone at the Saint-Sulpice church", now=1000))
+    assert later["callsign"] == "contact 2"
+
+
+def test_unknown_side_upgraded_by_second_report_but_contradiction_is_not_merged():
+    t = Tracker(gaz)
+    run(t.ingest("Zero, this is Alpha two, contact, tank at the Saint-Sulpice church", now=0))
+    [b] = run(t.ingest(f"Zero, this is Bravo one, {TANK_AT_CHURCH}", now=30))
+    assert b["callsign"] == "contact 1" and b["contact"]["side"] == "hostile"
+    [c] = run(t.ingest("Zero, this is Charlie one, contact, civilians at the Saint-Sulpice church", now=40))
+    assert c["callsign"] == "contact 2"
+
+
+def test_hostile_contact_warns_nearby_units_only():
+    t = Tracker(gaz)
+    run(t.ingest("Zero, this is Alpha two, south of the Saint-Sulpice church", now=0))
+    run(t.ingest("Zero, this is Bravo one, at the Medici fountain", now=0))
+    [c] = run(t.ingest(f"Zero, this is Charlie one, {TANK_AT_CHURCH}", now=10))
+    assert [w["callsign"] for w in c["threats"]] == ["alpha 2"]
+    assert c["threats"][0]["distance_m"] <= 300 and c["threats"][0]["direction"] in ("north", "northeast", "northwest")
+
+
+def test_unknown_side_contact_does_not_warn():
+    t = Tracker(gaz)
+    run(t.ingest("Zero, this is Alpha two, south of the Saint-Sulpice church", now=0))
+    [c] = run(t.ingest("Zero, this is Charlie one, contact, tank at the Saint-Sulpice church", now=10))
+    assert c["threats"] == []
+
+
+def test_unit_moving_next_to_known_enemy_is_warned():
+    t = Tracker(gaz)
+    run(t.ingest(f"Zero, this is Charlie one, {TANK_AT_CHURCH}", now=0))
+    [e] = run(t.ingest("Zero, this is Alpha two, south of the Saint-Sulpice church", now=30))
+    assert e["threats"] and e["threats"][0]["track"] == "contact 1"
+    [later] = run(t.ingest("Zero, this is Alpha two, south of the Saint-Sulpice church", now=5000))
+    assert later["threats"] == []   # the sighting has expired
+
+
+def test_tracks_survive_restart(tmp_path):
+    log = tmp_path / "events.jsonl"
+    t = Tracker(gaz, log=log)
+    run(t.ingest(f"Zero, this is Alpha two, {TANK_AT_CHURCH}", now=0))
+    r = Tracker(gaz, log=log)
+    [b] = run(r.ingest("Zero, this is Bravo one, contact, enemy tank near the Saint-Sulpice church", now=60))
+    assert b["callsign"] == "contact 1" and b["corroborated"]
+
+
+def test_over_before_a_place_is_kept():
+    [r] = stub_extract("Bravo two, spotted a helicopter flying west over the Odeon theatre")["reports"]
+    assert (r["relation"], r["anchor"]["name"], r["contact"]["heading"]) == ("at", "odeon theatre", "west")
+    [r] = stub_extract("Alpha one at the church over and out")["reports"]
+    assert r["anchor"]["name"] == "church"

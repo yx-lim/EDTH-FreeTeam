@@ -117,4 +117,58 @@ def validate(c: dict | None) -> dict:
         out["count"] = int(c["count"]) if c.get("count") is not None else None
     except (TypeError, ValueError):
         out["count"] = None
+    # Optional, from the Ukrainian/Russian vocabulary (data/threat_vocab.csv) or the model: the specific type as the
+    # troops say it, how long the sighting stays useful, the word heard, and "another one" (never merge it).
+    out["detail"] = str(c["detail"])[:60] if c.get("detail") else None
+    try:
+        out["ttl_s"] = int(c["ttl_s"]) if c.get("ttl_s") else None
+    except (TypeError, ValueError):
+        out["ttl_s"] = None
+    out["word"] = str(c["word"])[:40] if c.get("word") else None
+    out["another"] = bool(c.get("another"))
     return out
+
+
+# --- Tracks: one enemy seen twice is one contact, and nearby friends are warned ---------------------------------
+
+# How long a sighting stays current (the map fades it after this): a drone has moved on in minutes, an IED stays.
+# frontend/src/App.vue (CONTACT_TTL_S) mirrors this table.
+TTL_S = {"drone": 180, "helicopter": 300, "aircraft": 120, "artillery": 600, "sniper": 1800, "ied": 86400,
+         "civilians": 1800}
+DEFAULT_TTL_S = 900
+# How far a contact can plausibly have moved between two reports, for deciding whether two sightings are one.
+SPEED_MPS = {"infantry": 1.5, "sniper": 1.0, "civilians": 1.5, "tank": 8.0, "apc": 10.0, "vehicle": 12.0,
+             "drone": 15.0, "helicopter": 40.0, "aircraft": 100.0, "artillery": 0.0, "ied": 0.0, "unknown": 3.0}
+SAME_PLACE_M = 75        # two sightings this close (edge to edge, plus movement) can be the same thing
+WARN_M = 300             # a friendly unit this close to a hostile contact is warned
+
+
+def ttl(c: dict | None) -> float:
+    c = c or {}
+    return c.get("ttl_s") or TTL_S.get(c.get("what"), DEFAULT_TTL_S)   # a parser may set its own (contact_uk.py)
+
+
+def compatible(a: dict, b: dict) -> bool:
+    """Could two descriptions be the same thing? Same type (or one unknown), and sides that do not contradict."""
+    if a["what"] != b["what"] and "unknown" not in (a["what"], b["what"]):
+        return False
+    sides = {a["side"], b["side"]} - {"unknown"}
+    return len(sides) <= 1
+
+
+def combine(old: dict, new: dict) -> dict:
+    """The track's description after a second sighting: the more specific type and side, the larger count, the
+    latest activity and heading."""
+    return {**old, **new,   # extra fields a parser adds (detail, ttl_s) carry over
+            "what": new["what"] if new["what"] != "unknown" else old["what"],
+            "side": new["side"] if new["side"] != "unknown" else old["side"],
+            "count": max(filter(None, (old.get("count"), new.get("count"))), default=None),
+            "activity": new.get("activity") or old.get("activity"),
+            "heading": new.get("heading") if new.get("activity") else (new.get("heading") or old.get("heading"))}
+
+
+_POINTS = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"]
+
+
+def compass(bearing_deg: float) -> str:
+    return _POINTS[round(bearing_deg / 45) % 8]

@@ -25,7 +25,7 @@ const WHAT = { infantry: ['GPUCI', 'infantry'], sniper: ['GPUCIS', 'sniper'], ta
   civilians: ['GP', 'civilians'], unknown: ['GP', 'contact'] }
 // How long a sighting stays on the map: a drone has moved on within minutes, an IED stays where it is.
 const CONTACT_TTL_S = { drone: 180, helicopter: 300, aircraft: 120, artillery: 600, sniper: 1800, ied: 86400, civilians: 1800 }
-const contactTtl = (c) => CONTACT_TTL_S[c?.what] ?? 900
+const contactTtl = (c) => c?.ttl_s || CONTACT_TTL_S[c?.what] || 900
 const sideOf = (c) => SIDE[c?.side] || SIDE.unknown
 const sidc = (c, doubt) => {
   const f = (WHAT[c?.what] || WHAT.unknown)[0]
@@ -106,10 +106,34 @@ const live = computed(() => cursor.value === events.value.length)
 const isContact = (e) => e.type === 'contact'
 const callsigns = computed(() => [...new Set(events.value.filter((e) => !isContact(e)).map((e) => e.callsign))])
 // Sightings still worth showing: plotted, not withdrawn, and (live) younger than their type's lifetime.
-const contactsOnMap = computed(() => visible.value.filter((e) => isContact(e) && e.ok && !e.superseded
-  && (!live.value || now.value - e.t <= contactTtl(e.contact))))
-// One report is a draft (dashed) until confirmed; an ageing one is in doubt again.
-const contactDoubt = (e) => !e.confirmed || (live.value && now.value - e.t > contactTtl(e.contact) / 2)
+// Repeat sightings of one thing share a track callsign ("contact 2"): the map shows the latest sighting of each.
+const contactsOnMap = computed(() => {
+  const latest = new Map(), confirmed = new Set()
+  visible.value.forEach((e) => {
+    if (!isContact(e) || !e.ok || e.superseded) return
+    latest.set(e.callsign, e)
+    if (e.confirmed) confirmed.add(e.callsign)
+  })
+  return [...latest.values()].filter((e) => !live.value || now.value - e.t <= contactTtl(e.contact))
+    .map((e) => ({ ...e, trackConfirmed: confirmed.has(e.callsign) }))
+})
+// A single report is a draft (dashed) until the duty officer confirms it or a second station reports the same thing;
+// an ageing one is in doubt again.
+const contactDoubt = (e) => !(e.trackConfirmed || e.confirmed || e.corroborated)
+  || (live.value && now.value - e.t > contactTtl(e.contact) / 2)
+const WARN_M = 300   // backend/contact.py WARN_M
+const metres = ([lon1, lat1], [lon2, lat2]) => Math.hypot((lon2 - lon1) * 111320 * Math.cos((lat1 * Math.PI) / 180), (lat2 - lat1) * 110540)
+const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+const compass = ([lon1, lat1], [lon2, lat2]) => COMPASS[Math.round(((Math.atan2((lon2 - lon1) * Math.cos((lat1 * Math.PI) / 180), lat2 - lat1)
+  * 180) / Math.PI + 360) % 360 / 45) % 8]
+// Enemy contacts on the map within WARN_M of a unit (edge to edge, roughly), nearest first. Recomputed as reports
+// arrive and contacts expire, so a warning clears by itself.
+function threatsTo(u) {
+  return contactsOnMap.value.filter((c) => c.contact?.side === 'hostile')
+    .map((c) => ({ c, d: Math.max(0, metres(u.centre, c.centre) - u.radius_m - c.radius_m) }))
+    .filter((x) => x.d <= WARN_M).sort((a, b) => a.d - b.d)
+    .map(({ c, d }) => ({ what: describeContact({ ...c.contact, activity: null }), d: Math.round(d / 10) * 10, dir: compass(u.centre, c.centre) }))
+}
 const colour = (c) => (callsigns.value.includes(c) ? COLOURS[callsigns.value.indexOf(c) % COLOURS.length] : '#374151')
 const byId = computed(() => new Map(events.value.map((e) => [e.id, e])))
 const visibleTx = computed(() => (live.value ? txs.value : txs.value.filter((tx) => tx.t <= (visible.value.at(-1)?.t ?? 0))))
@@ -162,11 +186,17 @@ function render() {
     type: 'Feature', properties: { colour: colour(e.callsign) },
     geometry: circle(e.centre, Math.min(STALE_CAP_M, e.radius_m + WALK_MPS * Math.max(0, now.value - e.t))),
   })) : [] })
-  map.getSource('labels').setData({ type: 'FeatureCollection', features: current.map((e) => ({
-    type: 'Feature', geometry: { type: 'Point', coordinates: e.centre },
-    // Second line: the grid, never more precise than the report (±40 m reads as a 100 m square).
-    properties: { label: `${e.callsign} ±${Math.round(e.radius_m)} m${live.value ? ' · ' + ago(e.t) : ''}\n${mgrsAt(e.centre, { radius: e.radius_m })}`,
-      colour: colour(e.callsign) },
+  const threatened = current.map((e) => [e, showContacts.value ? threatsTo(e) : []]).filter(([, t]) => t.length)
+  map.getSource('labels').setData({ type: 'FeatureCollection', features: current.map((e) => {
+    const t = threatened.find(([u]) => u === e)?.[1] || []
+    return { type: 'Feature', geometry: { type: 'Point', coordinates: e.centre },
+      // Second line: the grid, never more precise than the report (±40 m reads as a 100 m square). Third: the nearest enemy.
+      properties: { label: `${e.callsign} ±${Math.round(e.radius_m)} m${live.value ? ' · ' + ago(e.t) : ''}\n${mgrsAt(e.centre, { radius: e.radius_m })}`
+        + (t.length ? `\n⚠ ${t[0].what} ${t[0].d} m ${t[0].dir}` : ''), colour: t.length ? SIDE.hostile.colour : colour(e.callsign) } }
+  }) })
+  // A red ring around every unit with an enemy within WARN_M.
+  map.getSource('threat').setData({ type: 'FeatureCollection', features: threatened.map(([e]) => ({
+    type: 'Feature', properties: {}, geometry: circle(e.centre, e.radius_m + 25),
   })) })
   map.getSource('tasks').setData({ type: 'FeatureCollection', features: tasks.value.map((e) => ({
     type: 'Feature', geometry: e.target.region,
@@ -179,7 +209,7 @@ function render() {
   map.getSource('contacts').setData({ type: 'FeatureCollection', features: seen.map((e) => ({
     type: 'Feature', geometry: { type: 'Point', coordinates: e.centre },
     properties: { icon: `ms:${sidc(e.contact, contactDoubt(e))}`, colour: sideOf(e.contact).colour,
-      label: `${describeContact(e.contact)}\n${live.value ? ago(e.t) + ' · ' : ''}${e.speaker ? 'seen by ' + e.speaker : 'reporter unknown'}` },
+      label: `${describeContact(e.contact)}\n${live.value ? ago(e.t) + ' · ' : ''}${e.seen_by?.length ? 'seen by ' + e.seen_by.join(', ') : 'reporter unknown'}` },
   })) })
   map.getSource('custom').setData({ type: 'FeatureCollection', features: customPlaces.value.map((p) => ({
     type: 'Feature', geometry: { type: 'Point', coordinates: [p.lon, p.lat] }, properties: { label: p.name },
@@ -238,6 +268,9 @@ function speak(e) {
   else if (e.ok) msg = `${e.callsign}, ${e.parsed?.relation === 'at' ? 'at' : (e.parsed?.relation || '').replaceAll('_', ' ')} ${e.anchor}`
   else if (e.type === 'intent') msg = `${e.callsign}, copy intention.`
   else msg = `${e.callsign}, say again. ${e.note || ''}`
+  // Warnings come first: "Warning. Alpha two, enemy tank 200 metres north of you."
+  const warn = (e.threats || []).map((w) => `${w.callsign}, ${describeContact({ ...w.contact, activity: null }, { spoken: true })} ${w.distance_m} metres ${w.direction} of you.`)
+  if (warn.length) msg = `Warning. ${warn.join(' ')} ${msg}`
   window.speechSynthesis.cancel()             // never queue up old read-backs behind the new one
   const u = new SpeechSynthesisUtterance(msg)
   u.lang = lang.value === 'fr' ? 'fr-FR' : 'en-GB'
@@ -485,7 +518,7 @@ onMounted(async () => {
   map.on('styleimagemissing', addSymbolImage)
   map.on('load', () => {
     const empty = { type: 'FeatureCollection', features: [] }
-    for (const id of ['regions', 'paths', 'labels', 'stale', 'custom', 'tasks', 'units', 'grid', 'grid-labels', 'contact-regions', 'contacts']) {
+    for (const id of ['regions', 'paths', 'labels', 'stale', 'custom', 'tasks', 'units', 'grid', 'grid-labels', 'contact-regions', 'contacts', 'threat']) {
       map.addSource(id, { type: 'geojson', data: empty })
     }
     // MGRS kilometre grid under everything we draw, with 2-digit easting/northing labels at the edges.
@@ -531,6 +564,8 @@ onMounted(async () => {
       layout: { 'text-field': ['get', 'label'], 'text-size': 12, 'text-offset': [0, -2.6], 'text-max-width': 30,
         'text-font': ['Open Sans Semibold'], 'text-line-height': 1.25 },
       paint: { 'text-color': ['get', 'colour'], 'text-halo-color': '#0b0d10', 'text-halo-width': 2 } })
+    map.addLayer({ id: 'threat-ring', type: 'line', source: 'threat',
+      paint: { 'line-color': SIDE.hostile.colour, 'line-width': 3, 'line-dasharray': [1, 1] } })
     // Sightings on top of everything: an enemy symbol must never hide under one of ours.
     map.addLayer({ id: 'contact-icon', type: 'symbol', source: 'contacts',
       layout: { 'icon-image': ['get', 'icon'], 'icon-allow-overlap': true, 'icon-ignore-placement': true } })
@@ -706,7 +741,10 @@ onUnmounted(() => {
             <span v-if="e.reached" class="tick">✓ arrived</span>
           </div>
           <div class="said">“{{ e.text }}”</div>
-          <div v-if="isContact(e)" class="contact" :style="{ color: sideOf(e.contact).colour }">⚠ {{ describeContact(e.contact) }}</div>
+          <div v-if="isContact(e)" class="contact" :style="{ color: sideOf(e.contact).colour }">⚠ {{ describeContact(e.contact) }}
+            <span v-if="e.merged_with" class="assumed">same as {{ e.callsign }}, seen by {{ e.seen_by.join(', ') }}</span></div>
+          <div v-for="w in e.threats || []" :key="w.callsign + (w.track || '')" class="warn">
+            ⚠ {{ w.callsign }}: {{ describeContact({ ...w.contact, activity: null }) }} {{ w.distance_m }} m {{ w.direction }}</div>
           <div v-if="e.ok" class="read">→ {{ (e.parsed?.relation || '').replaceAll('_', ' ') }} <b>{{ e.anchor }}</b> · ±{{ e.radius_m }} m
             <span class="gridref">{{ mgrsAt(e.centre, { radius: e.radius_m }) }}</span></div>
           <div v-if="e.superseded" class="note">corrected by a later report</div>
@@ -747,6 +785,7 @@ body { margin: 0; font: 14px/1.4 system-ui, sans-serif; color: var(--text); back
 .legend .frame { width: 16px; height: 11px; flex: none; background: #80e0ff; border: 1.5px solid #000; box-sizing: border-box; }
 .legend .sym { display: inline-flex; width: 16px; justify-content: center; flex: none; }
 .contact { font-weight: 600; }
+.warn { color: #f87171; font-weight: 700; }
 .legend .frame.dashed { border: 1.5px dashed #000; outline: 1px solid #80e0ff; background: transparent; }
 .maplibregl-ctrl-attrib { background: rgba(11, 13, 16, 0.7) !important; color: var(--muted); }
 .maplibregl-ctrl-attrib a { color: var(--muted) !important; }

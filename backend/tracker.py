@@ -13,9 +13,10 @@ from pathlib import Path
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 
+from . import contact as contacts
 from .extract import extract
 from .geo import Gazetteer, norm
-from .resolver import resolve
+from .resolver import bearing, resolve
 
 
 HOLD_S = 120   # how long a report with no callsign waits for the station to say who it is
@@ -26,6 +27,8 @@ class Tracker:
         self.gaz, self.log = gaz, log
         self.events: list[dict] = []
         self.pending: dict | None = None   # the last report heard with no callsign, held until someone claims it
+        # contact track ("contact 2") -> its latest sighting: {"id", "geom", "t", "contact", "seen_by"}
+        self.tracks: dict[str, dict] = {}
         # callsign -> fixes still standing, oldest first: (event id, region in metres, time)
         self.history: dict[str, list[tuple[int, BaseGeometry, float]]] = {}
         if log and log.exists():
@@ -70,6 +73,9 @@ class Tracker:
         out = []
         for subject, reports in by_subject.items():
             event = self._apply(subject, speaker, reports, text, now, replaces if subject == speaker else None)
+            fix = (self.history.get(subject) or [None])[-1]
+            if event["ok"] and fix and fix[0] == event["id"]:
+                event["threats"] = self._threats_near(subject, fix[1], now)   # walked up to a known enemy?
             out.append(stamp(event, callsign_assumed=not named and subject == speaker))
         # After the speaker's own position, so "200 m north of me" is measured from where they say they are now;
         # listed first, because a sighting matters more than a position update.
@@ -78,7 +84,7 @@ class Tracker:
     def _contact(self, report: dict, reporter: str | None, text: str, now: float) -> dict:
         """A sighting becomes its own track ("contact 3"), never a fix in any unit's history."""
         units = self.units()
-        n = 1 + sum(e.get("type") == "contact" for e in self.events)
+        n = 1 + len({e["callsign"] for e in self.events if e.get("type") == "contact"})
         event = {"id": len(self.events) + 1, "t": now, "callsign": f"contact {n}", "speaker": reporter, "text": text,
                  "parsed": report, "type": "contact", "contact": report.get("contact"), "ok": False, "superseded": False}
         if report.get("relative_to_reporter") and (reporter is None or reporter not in units):
@@ -90,9 +96,61 @@ class Tracker:
             # The reporter's position is the viewpoint ("behind the town hall" as seen from them). No walking-speed
             # check: a drone or a tank is not limited by how far a soldier can walk.
             result = resolve(report, self.gaz, last=units.get(reporter) if reporter else None, units=units)
+        geom = result.get("_geom")
         event.update({k: v for k, v in result.items() if k != "_geom"})
+        if event["ok"] and geom is not None:
+            same = self._same_track(event["contact"], geom, now)
+            if same:   # seen before: one enemy, more evidence, not a second enemy
+                track = self.tracks[same]
+                event.update(callsign=same, merged_with=track["id"],
+                             contact=contacts.combine(track["contact"], event["contact"]))
+                seen_by = list(dict.fromkeys([*track["seen_by"], reporter]))
+            else:
+                seen_by = [reporter]
+            event["seen_by"] = [s for s in seen_by if s]
+            event["corroborated"] = len(event["seen_by"]) >= 2   # two stations saw it: no longer one man's word
+            self._track(event, geom)
+            event["threats"] = self._threats_from(event["contact"], geom, now) if event["contact"]["side"] == "hostile" else []
         self.events.append(event)
         return event
+
+    def _track(self, event: dict, geom: BaseGeometry) -> None:
+        self.tracks[event["callsign"]] = {"id": event["id"], "geom": geom, "t": event["t"], "contact": event["contact"],
+                                          "seen_by": event.get("seen_by") or []}
+
+    def _live_tracks(self, now: float):
+        return [(cs, tr) for cs, tr in self.tracks.items() if 0 <= now - tr["t"] <= contacts.ttl(tr["contact"])]
+
+    def _same_track(self, desc: dict, geom: BaseGeometry, now: float) -> str | None:
+        """The live track this sighting most likely repeats: compatible description, and close enough given how far
+        that kind of thing could have moved since. None: a new contact."""
+        best, best_d = None, None
+        for cs, tr in self._live_tracks(now):
+            if not contacts.compatible(tr["contact"], desc):
+                continue
+            moved = contacts.SPEED_MPS.get(tr["contact"]["what"], 3.0) * max(0.0, now - tr["t"])
+            d = tr["geom"].distance(geom)
+            if d <= contacts.SAME_PLACE_M + moved and (best_d is None or d < best_d):
+                best, best_d = cs, d
+        return best
+
+    def _warning(self, unit: str, unit_geom: BaseGeometry, desc: dict, geom: BaseGeometry) -> dict | None:
+        d = unit_geom.distance(geom)
+        if d > contacts.WARN_M:
+            return None
+        return {"callsign": unit, "distance_m": round(d / 10) * 10, "contact": desc,
+                "direction": contacts.compass(bearing(unit_geom.centroid, geom.centroid))}
+
+    def _threats_from(self, desc: dict, geom: BaseGeometry, now: float) -> list[dict]:
+        """Friendly units close to a new hostile contact, nearest first."""
+        hits = [w for cs, ug in self.units().items() if (w := self._warning(cs, ug, desc, geom))]
+        return sorted(hits, key=lambda w: w["distance_m"])
+
+    def _threats_near(self, unit: str, unit_geom: BaseGeometry, now: float) -> list[dict]:
+        """Live hostile contacts close to a unit's new position, nearest first."""
+        hits = [{**w, "track": cs} for cs, tr in self._live_tracks(now) if tr["contact"]["side"] == "hostile"
+                and (w := self._warning(unit, unit_geom, tr["contact"], tr["geom"]))]
+        return sorted(hits, key=lambda w: w["distance_m"])
 
     def _hold(self, text: str, parsed: dict, now: float, source: str, stt: dict | None) -> dict:
         """A report with no callsign and no default to fall back on: plotting it on a guessed unit would put a team
@@ -136,6 +194,7 @@ class Tracker:
     def reset(self) -> None:
         self.events.clear()
         self.history.clear()
+        self.tracks.clear()
         self.pending = None
         self._write({"kind": "reset", "t": time.time()})
 
@@ -253,6 +312,7 @@ class Tracker:
             if kind == "reset":
                 self.events.clear()
                 self.history.clear()
+                self.tracks.clear()
             elif kind == "supersede":
                 for e in self.events:
                     if e["id"] == line["id"]:
@@ -266,6 +326,9 @@ class Tracker:
             elif kind == "event" and "id" in line:
                 line["id"] = len(self.events) + 1
                 self.events.append(line)
-                if line.get("ok") and line.get("region") and not line.get("superseded") and line.get("type") != "contact":
+                if line.get("ok") and line.get("region") and not line.get("superseded"):
                     geom = self.gaz.proj.to_xy(shape(line["region"]))
-                    self.history.setdefault(line["callsign"], []).append((line["id"], geom, line["t"]))
+                    if line.get("type") == "contact":
+                        self._track(line, geom)
+                    else:
+                        self.history.setdefault(line["callsign"], []).append((line["id"], geom, line["t"]))

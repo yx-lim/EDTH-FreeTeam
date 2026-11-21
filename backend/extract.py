@@ -182,6 +182,7 @@ _PATTERNS = [
     (r"\b(?:moving|heading|going|moved|walking)\s+(?:along|down|up)\s+(?P<a>.+)", "along"),
     (r"\ble long (?:de|du|des)\s+(?P<a>.+)", "along"),
     (r"\b(?:behind|derriere)\s+(?P<a>.+)", "behind"),
+    (r"\b(?:over|above|overhead|au dessus (?:de|du|des))\s+(?P<a>.+)", "at"),   # an aircraft or drone above a place
     (r"\b(?:in front of|devant)\s+(?P<a>.+)", "in_front_of"),
     (r"\b(?:near|next to|close to|by|beside|outside|not far from|pres (?:de|du|des)|a cote (?:de|du|des))\s+(?P<a>.+)", "near"),
     (r"\b(?:at|in|on|inside|au|aux|a la|a l|sur|dans)\s+(?P<a>.+)", "at"),
@@ -190,7 +191,7 @@ _HOLDING = r"\b(?:holding|hold position|no change|same position|stationary|stati
 _INTENT = r"\b(?:i ll be|i will be|will be at|we ll be|going to be|eta|je serai|nous serons)\b"
 _PREVIOUS = rf"\bback (?:to )?where (?:i|we) (?:was|were)\s+(?P<n>{_NUM})\s*minutes? ago"
 _CORRECTION = r"\b(?:correction|negative|negatif|je corrige|je rectifie)\b"
-_FILLERS = r"\b(?:uh|um|er|erm|euh|ah|hmm|over|out|terminé|termine|a vous|i say again|je repete)\b"
+_FILLERS = r"\b(?:uh|um|er|erm|euh|ah|hmm|out|terminé|termine|a vous|i say again|je repete)\b"
 _STREET = re.compile(r"(?:rue|boulevard|bd|avenue|av|quai|place|allee|impasse|passage|cour|carrefour|street|road)\b")
 
 
@@ -199,6 +200,10 @@ def _prep(text: str) -> str:
     t = "".join(c for c in t if not unicodedata.combining(c))
     t = re.sub(r"['’`\-–—]", " ", t)
     t = re.sub(r"[!?:]", ",", t)
+    # "over" is procedure when it closes a transmission (end, punctuation, "over and out", or the next call), but a
+    # place when something follows it: "drone flying west over the Odeon theatre".
+    t = re.sub(r"\bover and out\b", " ", t)
+    t = re.sub(rf"\bover\b(?=\s*(?:$|[,.;]|out\b|over\b|(?:this is\s+)?{_CS}\b))", " ", t)
     t = re.sub(_FILLERS, " ", t)
     return re.sub(r"\s+", " ", t).strip(" ,.;")
 
