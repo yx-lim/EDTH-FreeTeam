@@ -430,7 +430,7 @@ function queueSegment(samples, rate, startedAt, seconds) {
     const r = await fetch(`/api/net/audio?lang=${lang.value}&t=${startedAt.toFixed(2)}&dur=${seconds.toFixed(2)}`, {
       method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: wav })
     if (r.status === 501) {
-      netMsg.value = `transmission ${netSegments.value} detected (${seconds.toFixed(1)} s), but the server has no speech-to-text: set MISTRAL_API_KEY or install faster-whisper`
+      netMsg.value = `transmission ${netSegments.value} detected (${seconds.toFixed(1)} s), but the server has no speech-to-text: set ELEVENLABS_API_KEY or MISTRAL_API_KEY, or install faster-whisper`
       return
     }
     const out = await r.json().catch(() => ({}))
@@ -462,7 +462,7 @@ async function netStart(file) {
   netSegments.value = 0
   if (!file && !serverStt.value) {
     if (Speech) return browserNet()
-    netMsg.value = 'no speech-to-text: set MISTRAL_API_KEY or install faster-whisper on the server'
+    netMsg.value = 'no speech-to-text: set ELEVENLABS_API_KEY or MISTRAL_API_KEY, or install faster-whisper on the server'
     return
   }
   try {

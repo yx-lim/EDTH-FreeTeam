@@ -8,7 +8,7 @@ deterministic geometry over a pre-downloaded OpenStreetMap extract turns that in
 physically reachable, and keeps a corrected, timestamped history.
 
 ```
-push-to-talk            -> speech-to-text ->                                  extract (Mistral JSON / rules) -> tracker (state, corrections) -> resolver (Shapely, street routing) -> WebSocket -> MapLibre
+push-to-talk            -> speech-to-text ->                                  extract (Gemini / Mistral JSON / rules) -> tracker (state, corrections) -> resolver (Shapely, street routing) -> WebSocket -> MapLibre
 radio net -> VAD cuts   -> speech-to-text -> net (who, to whom, what kind) -> extract -> tracker ...
 ```
 
@@ -31,9 +31,11 @@ cd frontend && npm install && npm run dev
 Open http://localhost:5173, hold **Space** (or the button) and say
 `Zero, this is Alpha two, south of the Saint-Sulpice church, over`. Or type it.
 
-Without a `MISTRAL_API_KEY` in `.env` everything runs offline apart from the map tiles: a rule-based
-extractor (English and French) and the browser's speech recognition. Copy `.env.example` to `.env` to use
-Mistral for extraction and Voxtral for speech-to-text, or `pip install faster-whisper` for local Whisper.
+Copy `.env.example` to `.env` and add keys. With `GEMINI_API_KEY`, Gemini (`gemini-3.5-flash-lite`, ~1 s) reads the
+reports; with `ELEVENLABS_API_KEY`, ElevenLabs Scribe does speech-to-text. A Mistral key works for both too. With no
+keys everything runs offline apart from the map tiles: a rule-based extractor (English, French, Ukrainian demo
+grammar) and local Whisper (`pip install faster-whisper`) or the browser's speech recognition. If a cloud call fails,
+the report still goes through the rules, so the map never stops.
 
 No callsign heard (noise, a clipped start)? With the **Default callsign** box filled in, the report goes to that unit,
 marked "(assumed)" and drawn dashed until confirmed. With it empty, the report is held, not plotted, and the map reads
@@ -67,7 +69,7 @@ Try it without a radio:
 - `python -m scripts.make_demo_net` (macOS) voices the same script, one voice per station and band-limited like a
   handheld radio, into `data/demo_net.wav`. Play it with **Play a recording**, or `POST` it to `/net/recording`.
 
-Audio needs server speech-to-text (a Mistral key or faster-whisper). Without one, recordings are still cut into
+Audio needs server speech-to-text (an ElevenLabs or Mistral key, or faster-whisper). Without one, recordings are still cut into
 transmissions but not transcribed, and **Listen to the net** falls back to the browser's own continuous recogniser.
 
 ## Contact reports
@@ -109,7 +111,7 @@ sightings that merge across units.
 | "мопед пройшов над палацом на захід" | over the palace, heading west |
 
 Without a key the rules cover this demo grammar only (`backend/lang_uk.py`, `backend/contact_uk.py`); free speech
-needs Mistral, whose prompt now covers Ukrainian/Russian procedure and drone slang. A Cyrillic place that matches no
+needs the language model (Gemini or Mistral), whose prompt now covers Ukrainian/Russian procedure and drone slang. A Cyrillic place that matches no
 codename or alias is reported unknown, never guessed. Codenames rotate daily: replace `data/codenames.json` each
 morning. Threat words, lifetimes and which systems count as enemy-only are in `data/threat_vocab.csv` (from a
 teammate's list; rows marked `check` are unverified).
@@ -138,11 +140,11 @@ is silent. The event log (`data/events.jsonl`) is replayed on restart.
 
 | Path | What it does |
 |---|---|
-| `backend/extract.py` | Transcript to transmission `{speaker, reports[]}` (Mistral, falls back to rules on any error) |
+| `backend/extract.py` | Transcript to transmission `{speaker, reports[]}` (Gemini or Mistral, falls back to rules on any error) |
 | `backend/tracker.py` | Per-callsign state, corrections, holding/intent/history, combining clues, event log and replay |
 | `backend/resolver.py` | One report to a region; one rule per spatial relation; speed check |
 | `backend/geo.py` | Gazetteer: aliases, fuzzy names, custom points, street graph and walking regions |
-| `backend/stt.py` | Speech-to-text: Voxtral with place-name vocabulary (`context_bias`) or local faster-whisper |
+| `backend/stt.py` | Speech-to-text: ElevenLabs Scribe, Voxtral with place-name vocabulary (`context_bias`), or local faster-whisper |
 | `backend/net.py` | Radio-net mode: split at "over"; speaker, addressee and kind (report, request, order, ack, say again, radio check); acks, repeats, taskings |
 | `backend/vad.py`, `frontend/src/vad.js` | Energy voice-activity detection that cuts a channel into transmissions (server for recordings, browser live) |
 | `backend/app.py` | FastAPI: `POST /report`, `POST /audio`, `POST /net/text`, `POST /net/audio`, `POST /net/recording`, `POST /net/replay`, `GET /state`, `POST /places`, `POST /events/{id}/confirm`, `POST /events/{id}/reject`, `GET /picture.nvg`, `GET /picture.geojson`, `GET /export.geojson`, `POST /reset`, `WS /ws` |
@@ -180,6 +182,8 @@ What this repo can do now, grouped by area. Updated after each major implementat
   - Works out who is talking from radio procedure ("Zero, this is Alpha two…") and from who was just called.
   - Transmissions it can't tie to anyone are logged, never plotted.
 - **Offline speech-to-text**: local Whisper runs with no internet, so the demo survives bad Wi-Fi.
+- **Cloud models**: ElevenLabs Scribe for speech-to-text and Gemini for reading reports, picked automatically when
+  their keys are in `.env`; any failure falls back to the offline path.
 
 ### 2. Understanding Ukrainian and Russian
 - Ukrainian, Russian and mixed reports work in the language model, the speech-to-text and the UI.

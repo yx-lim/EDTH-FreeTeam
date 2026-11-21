@@ -1,6 +1,7 @@
 """Speech-to-text for push-to-talk clips (16 kHz mono WAV from the browser).
 
-Providers, picked by STT_PROVIDER or automatically:
+Providers, picked by STT_PROVIDER or automatically (in this order):
+  elevenlabs  ElevenLabs Scribe. Needs ELEVENLABS_API_KEY. Strong on Ukrainian and Russian.
   mistral  Voxtral via Mistral's API, primed with the district's place names (context_bias). Needs MISTRAL_API_KEY.
   whisper  faster-whisper running locally, primed through initial_prompt. Offline. `pip install faster-whisper`.
            Default `small` on the CPU: ~2-3 s a clip on an M-series Mac. large-v3-turbo is more accurate (12% vs 19%
@@ -20,6 +21,8 @@ import httpx
 
 STT_URL = "https://api.mistral.ai/v1/audio/transcriptions"
 STT_MODEL = os.getenv("STT_MODEL", "voxtral-mini-transcribe-3")
+ELEVENLABS_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+ELEVENLABS_MODEL = os.getenv("ELEVENLABS_STT_MODEL", "scribe_v1")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 _whisper = None
@@ -70,6 +73,8 @@ def provider() -> str | None:
     chosen = os.getenv("STT_PROVIDER")
     if chosen:
         return None if chosen == "none" else chosen
+    if os.getenv("ELEVENLABS_API_KEY"):
+        return "elevenlabs"
     if os.getenv("MISTRAL_API_KEY"):
         return "mistral"
     try:
@@ -82,13 +87,14 @@ def provider() -> str | None:
 async def transcribe(audio: bytes, vocabulary: list[str], language: str | None = None) -> dict:
     name = provider()
     if name is None:
-        raise RuntimeError("no speech-to-text provider: set MISTRAL_API_KEY or install faster-whisper")
+        raise RuntimeError("no speech-to-text provider: set ELEVENLABS_API_KEY or MISTRAL_API_KEY, or install faster-whisper")
     language = None if language in (None, "", "auto") else language
     if language in ("uk", "ru"):   # callsigns, procedure words and drone slang first: they are what gets misheard
         from . import lang_uk
         vocabulary = list(dict.fromkeys(lang_uk.vocabulary() + vocabulary))
     t0 = time.perf_counter()
-    text = await (_mistral(audio, vocabulary, language) if name == "mistral" else _local(audio, vocabulary, language))
+    run = {"elevenlabs": _elevenlabs, "mistral": _mistral}.get(name, _local)
+    text = await run(audio, vocabulary, language)
     return {"text": text.strip(), "provider": name, "stt_ms": round((time.perf_counter() - t0) * 1000)}
 
 
@@ -99,6 +105,17 @@ async def _mistral(audio: bytes, vocabulary: list[str], language: str | None) ->
     async with httpx.AsyncClient(timeout=20) as client:
         r = await client.post(STT_URL, data=data, files={"file": ("clip.wav", audio, "audio/wav")},
                               headers={"Authorization": f"Bearer {os.environ['MISTRAL_API_KEY']}"})
+        r.raise_for_status()
+    return r.json().get("text", "")
+
+
+async def _elevenlabs(audio: bytes, vocabulary: list[str], language: str | None) -> str:
+    data: dict = {"model_id": ELEVENLABS_MODEL, "tag_audio_events": "false"}
+    if language:
+        data["language_code"] = language
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(ELEVENLABS_URL, data=data, files={"file": ("clip.wav", audio, "audio/wav")},
+                              headers={"xi-api-key": os.environ["ELEVENLABS_API_KEY"]})
         r.raise_for_status()
     return r.json().get("text", "")
 

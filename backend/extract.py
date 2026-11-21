@@ -1,11 +1,13 @@
-"""Transcript -> structured transmission. Uses Mistral when MISTRAL_API_KEY is set, a rule-based parser otherwise
-(and as a fallback whenever the API call fails, so the map never stops updating).
+"""Transcript -> structured transmission. Uses Gemini when GEMINI_API_KEY is set, else Mistral when MISTRAL_API_KEY is
+set (EXTRACTOR=gemini|mistral|rules forces one), and a rule-based parser otherwise and as a fallback whenever the API
+call fails, so the map never stops updating.
 
 A transmission can hold several reports: "Alpha one, Bravo one is at the theatre, I'm still at the fountain"
 is one report about Bravo 1 and one about Alpha 1. The model is never asked for coordinates.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -19,6 +21,8 @@ from .geo import norm
 
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
 MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 RELATIONS = ["at", "near", "behind", "in_front_of", "north_of", "south_of", "east_of", "west_of",
              "northeast_of", "northwest_of", "southeast_of", "southwest_of",
@@ -89,20 +93,31 @@ Examples:
 {{"speaker":"лис","reports":[{{"subject":null,"type":"contact","anchor":{{"name":"Сарай","kind":"landmark"}},"anchor2":null,"relation":"west_of","distance_m":50,"vague":true,"minutes_ago":null,"confidence":0.8,"contact":{{"what":"drone","side":"unknown","count":1,"activity":"static","heading":null,"word":"ждун"}}}}]}}"""
 
 
+def model() -> tuple[str, str, str] | None:
+    """(name, label, key) of the language model to use, or None for the rules."""
+    chosen = (os.getenv("EXTRACTOR") or "").lower()
+    options = [("gemini", GEMINI_MODEL, os.getenv("GEMINI_API_KEY")), ("mistral", MISTRAL_MODEL, os.getenv("MISTRAL_API_KEY"))]
+    for name, label, key in options:
+        if key and chosen in ("", name):
+            return name, f"{name}:{label}", key
+    return None
+
+
 async def extract(text: str) -> dict:
     """Returns {"speaker", "reports": [...], "extractor", "extract_ms"}."""
     t0 = time.perf_counter()
-    key = os.getenv("MISTRAL_API_KEY")
+    chosen = model()
     out = None
-    if key:
+    if chosen:
+        name, label, key = chosen
         try:
-            out = await _mistral(text, key)
-            out["extractor"] = f"mistral:{MISTRAL_MODEL}"
+            out = await (_gemini if name == "gemini" else _mistral)(text, key)
+            out["extractor"] = label
             if lang_uk.has_cyrillic(text):
                 _enrich_uk(out, text)
         except Exception as err:  # network, quota, malformed JSON: degrade, don't drop the report
             out = stub_extract(text)
-            out["extractor"] = f"rules (mistral failed: {type(err).__name__})"
+            out["extractor"] = f"rules ({name} failed: {type(err).__name__})"
     if out is None:
         out = stub_extract(text)
         out["extractor"] = "rules"
@@ -121,6 +136,23 @@ async def _mistral(text: str, key: str) -> dict:
         r = await client.post(MISTRAL_URL, json=payload, headers={"Authorization": f"Bearer {key}"})
         r.raise_for_status()
     return validate(json.loads(r.json()["choices"][0]["message"]["content"]))
+
+
+async def _gemini(text: str, key: str) -> dict:
+    payload = {
+        "systemInstruction": {"parts": [{"text": SYSTEM}]},
+        "contents": [{"role": "user", "parts": [{"text": text}]}],
+        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
+    }
+    async with httpx.AsyncClient(timeout=8) as client:
+        for attempt in range(2):   # "high demand" spikes are brief: one quick retry, then the rules take over
+            r = await client.post(GEMINI_URL.format(model=GEMINI_MODEL), json=payload, headers={"x-goog-api-key": key})
+            if r.status_code not in (429, 500, 503) or attempt:
+                break
+            await asyncio.sleep(0.3)
+        r.raise_for_status()
+    parts = r.json()["candidates"][0]["content"]["parts"]
+    return validate(json.loads("".join(p.get("text", "") for p in parts)))
 
 
 def _callsign(text: str | None) -> str | None:
