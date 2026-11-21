@@ -252,6 +252,8 @@ def _parse_clause(clause: str) -> dict | None:
 
 
 def stub_extract(text: str) -> dict:
+    if lang_uk.cyrillic_share(text) > 0.3:   # Ukrainian / Russian radio procedure and the demo grammar
+        return validate(lang_uk.stub_extract_uk(text))
     t = _prep(text)
     speaker, subjects = None, None
     m = re.match(rf"(?:hello\s+|allo\s+)?(?P<to>{_CS})\s*,?\s*(?:this is|ici|de)\s+(?P<frm>{_CS})\b[\s,]*", t)

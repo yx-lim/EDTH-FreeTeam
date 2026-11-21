@@ -26,18 +26,20 @@ from pathlib import Path
 
 from shapely.geometry import Point, shape
 
+from . import lang_uk
 from .extract import _CS, _callsign, _parse_clause, _prep, extract
 from .resolver import resolve
 from .tracker import Tracker
 
-CONTROL = {"zero", "command", "control", "hq"}
+CONTROL = {"zero", "command", "control", "hq", "вежа", "башня", "tower", "база"}
 ALL = "all stations"
 CONTINUE_S = 3.0     # a pause shorter than this, without "over", is one transmission cut in two by the VAD
 REPLY_S = 45.0       # how long a call waits for its answer
 ACK_S = 120.0        # an acknowledgement or "say again" refers to a transmission at most this old
 REACHED_M = 40.0     # a tasked unit reporting within this distance of its destination has arrived
 PROWORDS = ["Zero", "Alpha", "Bravo", "Charlie", "Delta", "Echo", "this is", "over", "out", "roger", "wilco",
-            "say again", "send position", "ici", "à vous", "terminé", "reçu"]
+            "say again", "send position", "ici", "à vous", "terminé", "reçu",
+            "прийом", "приём", "Вежа", "Башня", "плюс", "мінус", "кінець зв'язку"]
 
 _ST = rf"(?:all stations|toutes (?:les )?stations|{_CS})"
 # Atomic groups below keep "Bravo one is ..." from backtracking to a bare "Bravo" that would pass this check.
@@ -60,7 +62,8 @@ _HOLD = (r"^(?:(?:please|now)\s+)*(?:hold (?:your )?position|hold there|stay whe
          r"restez (?:sur place|en position|ou vous etes)|ne bougez (?:pas|plus))\b")
 _ACK = (r"(?:roger(?: that)?|copy(?: that)?|copied|wilco|received|understood|acknowledged|ack|affirmative|affirm|noted|"
         r"send|go ahead|ready to copy|recu|bien recu|compris|bien compris|parlez|allez y|thanks|thank you|merci|good)")
-_END = re.compile(r"\b(?:over and out|over|out|à vous|a vous|terminé|termine)\b(?P<p>[.!,;]*)\s+", re.I)
+_END = re.compile(r"\b(?:over and out|over|out|à vous|a vous|terminé|termine|прийом|приём|прием|кінець зв.язку|конец связи"
+                  r"|відбій|отбой)(?!\w)(?P<p>[.!,;]*)\s+", re.I)
 
 
 def split(text: str) -> list[str]:
@@ -77,6 +80,8 @@ def split(text: str) -> list[str]:
 
 def ended(text: str) -> str | None:
     """How the transmission closed: "over" (an answer is expected), "out" (exchange finished) or None."""
+    if lang_uk.has_cyrillic(text) and (how := lang_uk.ended(text)):
+        return how
     t = unicodedata.normalize("NFKD", text.lower())
     t = re.sub(r"[^a-z0-9]+", " ", "".join(c for c in t if not unicodedata.combining(c)))
     m = re.search(r"\b(over and out|over|out|a vous|termine)\s*$", t)
@@ -161,8 +166,9 @@ class Net:
     # --- one transmission ----------------------------------------------------------------------
     async def _one(self, text: str, t: float, end: float, source: str, stt: dict | None) -> dict:
         prepped = _prep(text)
-        to, frm, single, body, how = header(prepped)
-        kind, parsed = kind_of(body), None
+        cyrillic = lang_uk.cyrillic_share(text) > 0.3
+        to, frm, single, body, how = lang_uk.header(text) if cyrillic else header(prepped)
+        kind, parsed = (lang_uk.kind_of(body) if cyrillic else kind_of(body)), None
         if kind is None:
             relayed = re.search(_RELAY, prepped)
             parsed = await extract(re.sub(_RELAY, r"\g<cs> is ", prepped) if relayed else text)
@@ -274,13 +280,21 @@ class Net:
         if not unit or unit == ALL:
             tx["note"] = "order to all stations" if unit else "order with no addressee"
             return
-        m = re.match(_ORDER, body.strip(" ,.;"))
+        if lang_uk.cyrillic_share(body) > 0.3:
+            got = lang_uk.order(body)
+            dest = got[1] if got else None
+            m = dest is not None
+        else:
+            m = re.match(_ORDER, body.strip(" ,.;"))
+            dest = m["a"] if m else None
         fields: dict = {"order": "hold position" if not m else "move"}
         note = "ordered to hold position"
         if m:
-            dest = m["a"]
-            clause = _parse_clause(dest if re.match(r"(?:the |la |le )?(?:corner|intersection|carrefour|coin|angle)\b", dest)
-                                   or re.match(r"\d|north|south|east|west", dest) else f"at {dest}")
+            if lang_uk.has_cyrillic(dest):
+                clause = lang_uk.parse_location(dest if re.search(r"\bвид\b|\bот\b", lang_uk.fold(dest)) else f"на {dest}")
+            else:
+                clause = _parse_clause(dest if re.match(r"(?:the |la |le )?(?:corner|intersection|carrefour|coin|angle)\b", dest)
+                                       or re.match(r"\d|north|south|east|west", dest) else f"at {dest}")
             last = self.tracker.units().get(unit)
             r = resolve(clause, self.gaz, last=last) if clause else {"ok": False, "note": f"unknown place: {dest!r}"}
             if r["ok"]:

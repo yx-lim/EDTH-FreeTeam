@@ -173,3 +173,257 @@ def unit_lookup(spoken: str, units) -> str | None:
         if canon.lower() in units:
             names.update({n: canon.lower() for n in alts})
     return lookup(spoken, index_of(names)) if names else None
+
+
+# --- radio procedure and rule-based parsing (closed demo grammar; free speech needs the language model) -------------
+# Everything below works on folded text, so one pattern covers Ukrainian, Russian and their mixtures. Patterns are
+# written in normal spelling and folded once here.
+
+def _alt(*phrases: str) -> str:
+    return "(?:" + "|".join(sorted({re.escape(fold(p)).replace(r"\ ", r"\s+") for p in phrases}, key=len,
+                                   reverse=True)) + ")"
+
+
+CONTROL_WORDS = {fold(w) for w in ("Вежа", "Башня", "Tower", "База")}
+ALL_WORDS = {fold(w) for w in ("всім", "всем", "всім станціям", "всем станциям")}
+OVER = _alt("прийом", "приём", "прием")
+OUT = _alt("кінець зв'язку", "конец связи", "відбій", "отбой", "кінець", "конец")
+ACK = _alt("плюс", "прийняв", "прийнято", "принял", "принято", "зрозумів", "зрозуміло", "понял", "понятно",
+           "так точно", "добре", "есть", "є", "роджер", "roger", "виконую", "выполняю", "висуваюсь", "выдвигаюсь")
+SAY_AGAIN = _alt("повтори", "повторіть", "повторите", "не чую", "не слышу", "не зрозумів", "не понял")
+CHECK = _alt("перевірка зв'язку", "проверка связи", "як чуєш", "как слышишь", "як чути", "как слышно", "чую добре",
+             "чую нормально", "чую вас", "слышу хорошо", "слышу нормально", "слышу вас")
+REQUEST = _alt("доповідай", "доповідайте", "доповідь", "доклад", "докладывай", "докладывайте", "де ти", "де ви",
+               "где ты", "где вы", "твоя позиція", "ваша позиція", "твоя позиция", "ваша позиция", "позицію",
+               "позицию")
+ORDER_MOVE = _alt("висувайся до", "висувайтесь до", "висувайтеся до", "рухайся до", "рухайтесь до",
+                  "выдвигайся к", "выдвигайтесь к", "двигайся к", "двигайтесь к", "иди до", "иди к", "йди до")
+ORDER_HOLD = _alt("тримай позицію", "тримайте позицію", "залишайся на місці", "залишайтесь на місці",
+                  "держи позицию", "держите позицию", "оставайся на месте", "оставайтесь на месте")
+CORRECTION = _alt("мінус", "минус", "отставить", "відставити", "поправка", "виправлення")
+HOLDING = _alt("без змін", "без изменений", "там само", "там же", "на тому ж місці", "на том же месте",
+               "стою на місці", "стою на месте", "на місці", "на месте")
+INTENT = _alt("буду через", "буду за", "будем через", "будемо через", "буду на", "будем на", "будемо на")
+VAGUE = _alt("близько", "около", "приблизно", "примерно", "десь", "где-то", "майже", "почти")
+POSITION_WORDS = _alt("на позиції", "на позиции", "я на позиції", "стою", "знаходжусь", "нахожусь", "перебуваю")
+_PREP = _alt("від", "от", "of", "from", "до", "к", "біля", "возле", "у", "в", "на", "за", "с", "з", "із", "над",
+             "під", "под", "поруч", "рядом", "около")
+
+_DIRS = [  # folded stems -> relation; compounds first
+    (r"(?:пивнично|северо)\s*(?:схид|восто)\w*|(?:пивничн\w*\s+схид\w*)|north\s*east", "northeast_of"),
+    (r"(?:пивнично|северо)\s*(?:захид|запад)\w*|(?:пивничн\w*\s+захид\w*)|north\s*west", "northwest_of"),
+    (r"(?:пивденно|юго)\s*(?:схид|восто)\w*|(?:пивденн\w*\s+схид\w*)|south\s*east", "southeast_of"),
+    (r"(?:пивденно|юго)\s*(?:захид|запад)\w*|(?:пивденн\w*\s+захид\w*)|south\s*west", "southwest_of"),
+    (r"пивнич\w*|север\w*|north", "north_of"),
+    (r"пивден\w*|юг\w*|южн\w*|south", "south_of"),
+    (r"схид\w*|восто\w*|east", "east_of"),
+    (r"захид\w*|запад\w*|west", "west_of"),
+]
+_DIR = "|".join(f"(?:{p})" for p, _ in _DIRS)
+_NUMW = "|".join(sorted((re.escape(k) for k in _UNITS), key=len, reverse=True))
+_N = rf"(?:\d+(?:\.\d+)?|(?:\b(?:{_NUMW})\b\s*)+)"
+_M = r"(?:метр\w*|м|m|meters?|metres?)"
+_DIST = rf"(?:(?P<d1>{_N})\s*{_M}\b|\b{_M}\s+(?P<d2>{_N}))"
+
+
+def relation_of(direction: str) -> str | None:
+    for p, rel in _DIRS:
+        if re.fullmatch(p, direction.strip()):
+            return rel
+    return None
+
+
+_TOKEN = re.compile(r"[^\W_][\w'’ʼ-]*|[,.;!?]")
+
+
+def tokens(text: str) -> list[tuple[str, str]]:
+    """(as spoken, folded) per word or punctuation mark."""
+    return [(t, fold(t) or t) for t in _TOKEN.findall(unicodedata.normalize("NFC", text))]
+
+
+def _is_station(f: str) -> bool:
+    return f in CONTROL_WORDS or f in ALL_WORDS or any(
+        same_word(f, fold(n)) and len(f) - len(fold(n)) <= 2 for n in callsign_names())
+
+
+def station(spoken: str) -> str:
+    f = fold(spoken)
+    if f in ALL_WORDS:
+        return "all stations"
+    if f in CONTROL_WORDS:
+        return callsign(spoken) if any(same_word(f, fold(n)) for n in callsign_names()) else f
+    return callsign(spoken)
+
+
+def header(text: str) -> tuple[str | None, str | None, str | None, str, str]:
+    """Like net.header for Ukrainian/Russian procedure: (to, from, single callsign, body, how).
+    "Вежа, я Сокіл, ..." / "я Сокіл, ..." / "Сокіл, Вежа, ..." / "Сокіл, ..." / "Плюс, Сокіл.\""""
+    toks = [t for t in tokens(text)]
+    words = [(i, s, f) for i, (s, f) in enumerate(toks) if f not in ",.;!?"]
+    acks = {fold(w) for w in ("плюс", "прийняв", "принял", "прийнято", "принято", "зрозумів", "понял")}
+
+    def body_from(k: int) -> str:
+        return " ".join(s for s, _ in toks[k:])
+
+    for j, (i, s, f) in enumerate(words[:5]):
+        if f == "я" and j + 1 < len(words):
+            frm_i = j + 1
+            name = words[frm_i][1]
+            nxt = words[frm_i + 1][2] if frm_i + 1 < len(words) else ""
+            if (nxt.isdigit() and len(nxt) == 1) or (_UNITS.get(nxt, 99) < 10 and float(_UNITS[nxt]).is_integer()):
+                name, frm_i = f"{name} {words[frm_i + 1][1]}", frm_i + 1
+            before = [w for w in words[:j] if w[2] not in acks]
+            to = station(before[-1][1]) if before and _is_station(before[-1][2]) else None
+            lead = " ".join(w[1] for w in words[:j] if w[2] in acks)
+            return to, station(name), None, (lead + " " + body_from(words[frm_i][0] + 1)).strip(" ,.;"), "named in the call"
+    first = [w for w in words if w[2] not in acks]
+    if first and _is_station(first[0][2]):
+        lead = " ".join(w[1] for w in words if w[2] in acks and w[0] < first[0][0])
+        if len(first) > 1 and _is_station(first[1][2]) and first[1][0] - first[0][0] <= 2:
+            rest = body_from(first[1][0] + 1)
+            return station(first[0][1]), station(first[1][1]), None, f"{lead} {rest}".strip(" ,.;"), "abbreviated call"
+        rest = body_from(first[0][0] + 1)
+        return None, None, station(first[0][1]), f"{lead} {rest}".strip(" ,.;"), ""
+    return None, None, None, text.strip(" ,.;"), ""
+
+
+def ended(text: str) -> str | None:
+    t = fold(text)
+    if re.search(rf"\b{OUT}\s*$", t):
+        return "out"
+    return "over" if re.search(rf"\b{OVER}\s*$", t) else None
+
+
+def fold_keep(text: str) -> str:
+    """fold(), but punctuation stays: clause boundaries matter ("мінус, не Сарай. Сто метрів ...")."""
+    return " ".join(f for _, f in tokens(text))
+
+
+def strip_procedure(text: str) -> str:
+    return re.sub(rf"\b(?:{OVER}|{OUT})\b", " ", fold_keep(text))
+
+
+def kind_of(body: str) -> str | None:
+    b = strip_procedure(body).strip(" ,.;")
+    if not b:
+        return "call"
+    if re.search(rf"\b{SAY_AGAIN}\b", b):
+        return "say_again"
+    if re.search(rf"\b{CHECK}\b", b):
+        return "radio_check"
+    if re.search(rf"\b{ORDER_MOVE}\b", b) or re.search(rf"\b{ORDER_HOLD}\b", b):
+        return "order"
+    if re.search(rf"\b{REQUEST}\b", b) and not re.search(_DIST, b):
+        return "request"
+    rest = re.sub(rf"\b{ACK}\b", " ", b)
+    rest = " ".join(w for w in re.sub(r"[,.;!?]", " ", rest).split() if not _is_station(w))
+    return "ack" if not rest else None
+
+
+def order(body: str) -> tuple[str, str | None] | None:
+    """("move", destination as spoken) or ("hold", None)."""
+    b = strip_procedure(body).strip(" ,.;")
+    m = re.search(rf"\b{ORDER_MOVE}\s+(?P<a>[^,.;]+)", b)
+    if m:
+        return "move", m["a"].strip()
+    return ("hold", None) if re.search(rf"\b{ORDER_HOLD}\b", b) else None
+
+
+MOVE_VERBS = _alt("рухаюсь", "рухаюся", "рухаємось", "рухаються", "рухається", "іду", "йду", "йдемо", "йде", "йдуть",
+                  "иду", "идем", "идет", "идут", "висуваюсь", "выдвигаюсь", "двигаюсь", "двигаемся", "двигается",
+                  "двигаются", "летить", "летять", "летит", "летят", "пройшов", "прошел", "пролетів", "пролетел")
+TOWARDS = _alt("до", "к", "в напрямку", "в направлении", "в сторону", "у напрямку", "у бік", "в бік")
+NEAR = _alt("поруч з", "поруч із", "рядом с", "недалеко від", "недалеко от", "біля", "возле", "около", "коло", "near")
+SEE = _alt("бачу", "вижу", "спостерігаю", "наблюдаю", "курс")
+
+
+def _anchor(name: str | None) -> dict | None:
+    if not name:
+        return None
+    name = re.split(rf"[,.;]|\s(?:не|{MOVE_VERBS}|{SEE})\s", f" {name} ")[0]
+    name = re.sub(rf"\s*{_DIST}.*$", "", name)
+    name = re.sub(rf"^(?:{_PREP}\s+)+", "", name.strip())
+    name = re.sub(rf"\b(?:{OVER}|{OUT})\b.*$", "", name).strip()
+    return {"name": name, "kind": "landmark"} if name else None
+
+
+def parse_location(clause: str) -> dict | None:
+    """One clause (folded) -> a report with anchor and relation, or None."""
+    c = re.sub(rf"\b{POSITION_WORDS}\b", " ", clause)
+    c = re.sub(r"\s+", " ", c).strip(" ,.;")
+    if not c:
+        return None
+    vague = bool(re.search(rf"\b{VAGUE}\b", c)) or bool(re.search(rf"\b{_M}\s+{_N}", c))
+    dist = None
+    m = re.search(_DIST, c)
+    if m:
+        dist = number(m["d1"] or m["d2"])
+
+    def out(rel, a, b=None, typ="position"):
+        anc = _anchor(a)
+        if not anc:
+            return None
+        return {"subject": None, "type": typ, "anchor": anc, "anchor2": _anchor(b), "relation": rel,
+                "distance_m": dist, "minutes_ago": None, "confidence": 0.5, "vague": vague}
+
+    m = re.search(rf"\b(?:миж|между|between)\s+(?P<a>.+?)\s+(?:и|та|and)\s+(?P<b>.+)", c)
+    if m:
+        return out("between", m["a"], m["b"])
+    # "100 метрів на схід від Сараю", "к северу от Сарая", "east від озера", "севернее Сарая", "північніше Сараю"
+    m = re.search(rf"(?:\bна\s+|\bк\s+|\bto the\s+)?(?P<dir>{_DIR})\s+(?:вид|от|of|from)\s+(?P<a>.+)", c)
+    if not m:
+        m = re.search(rf"(?P<dir>(?:(?:пивнично|северо|пивденно|юго)\s*)?\w+(?:ише|ее))\s+(?P<a>.+)", c)
+    if m:
+        d = m["dir"]
+        rel = relation_of(re.sub(r"(?:ише|ее)$", "", d)) or relation_of(d)
+        if rel:
+            return out(rel, m["a"])
+    m = re.search(rf"\b{MOVE_VERBS}\s+{TOWARDS}\s+(?P<a>.+)", c)
+    if m:
+        return out("towards", m["a"], typ="movement")
+    m = re.search(rf"\b{_alt('в напрямку', 'в направлении', 'в сторону', 'у напрямку')}\s+(?P<a>.+)", c)
+    if m:
+        return out("towards", m["a"], typ="movement")
+    m = re.search(rf"\b(?:позаду|позади|за)\s+(?P<a>(?!{_N}).+)", c)
+    if m:
+        return out("behind", m["a"])
+    m = re.search(rf"\b{NEAR}\s+(?P<a>.+)", c)
+    if m:
+        return out("near", m["a"])
+    m = re.search(rf"\b(?:на|в|у|при|at)\s+(?P<a>.+)", c)
+    if m:
+        return out("at", m["a"])
+    return None
+
+
+def stub_extract_uk(text: str) -> dict:
+    """Rule-based fallback for Ukrainian/Russian radio reports: the closed demo grammar (header, corrections,
+    holding, eight directions, distances, between/near/behind/at, movement). Free speech needs the language model."""
+    to, frm, single, body, _ = header(text)
+    speaker = frm or (single if single and not (fold(single) in CONTROL_WORDS or single == "all stations") else None)
+    t = strip_procedure(body)
+    t = re.sub(rf"^(?:{ACK})\b[\s,.]*", "", t)
+    correction = False
+    marks = list(re.finditer(rf"\b{CORRECTION}\b", t))
+    if marks:
+        correction, t = True, t[marks[-1].end():]
+    t = re.sub(r"\bне\s+[^,.;]*", " ", t)   # "не озеро": what it is not
+    intent = bool(re.search(rf"\b{INTENT}\b", t))
+    reports = []
+    for clause in filter(None, (c.strip() for c in re.split(r"\s*[,.;!?]\s*", t))):
+        r = parse_location(clause)
+        if r is None and re.search(rf"\b{HOLDING}\b", clause):
+            r = {"subject": None, "type": "holding", "anchor": None, "anchor2": None, "relation": "at",
+                 "distance_m": None, "minutes_ago": None, "confidence": 0.6}
+        if r is None:
+            continue
+        if intent:
+            r["type"] = "intent"
+        elif correction and r["type"] != "holding":
+            r["type"] = "correction"
+        reports.append(r)
+        break   # one location per transmission in the demo grammar; the model handles more
+    if not reports:
+        reports = [{"subject": None, "type": "other", "anchor": None, "anchor2": None, "relation": "at",
+                    "distance_m": None, "minutes_ago": None, "confidence": 0.0}]
+    return {"speaker": speaker, "reports": reports}

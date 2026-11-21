@@ -154,12 +154,14 @@ async def net_recording(request: Request, lang: str | None = None) -> dict:
 
 
 @app.post("/net/replay")
-async def net_replay(speed: float = 3.0) -> dict:
-    """Play data/demo_net.jsonl onto the net, `speed` times faster than scripted (its own clock keeps real gaps)."""
+async def net_replay(speed: float = 3.0, script: str = "en") -> dict:
+    """Play a demo net onto the net, `speed` times faster than scripted (its own clock keeps real gaps).
+    script: "en" (data/demo_net.jsonl, English and French) or "uk" (data/demo_net_uk.jsonl, Ukrainian and Russian)."""
     global replay_task
     if replay_task and not replay_task.done():
         raise HTTPException(409, "a replay is already running")
-    lines = [json.loads(s) for s in (DATA / "demo_net.jsonl").read_text(encoding="utf-8").splitlines() if s.strip()]
+    path = DATA / ("demo_net_uk.jsonl" if script == "uk" else "demo_net.jsonl")
+    lines = [json.loads(s) for s in path.read_text(encoding="utf-8").splitlines() if s.strip()]
 
     async def run() -> None:
         start, offset = time.time(), 0.0
