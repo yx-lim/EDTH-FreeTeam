@@ -194,7 +194,7 @@ function render() {
     return { type: 'Feature', geometry: { type: 'Point', coordinates: e.centre },
       // Second line: the grid, never more precise than the report (±40 m reads as a 100 m square). Third: the nearest enemy.
       properties: { label: `${e.callsign} ±${Math.round(e.radius_m)} m${live.value ? ' · ' + ago(e.t) : ''}\n${mgrsAt(e.centre, { radius: e.radius_m })}`
-        + (t.length ? `\n⚠ ${t[0].what} ${t[0].d} m ${t[0].dir}` : ''), colour: t.length ? SIDE.hostile.colour : colour(e.callsign) } }
+        + (t.length ? `\n⚠ ${t[0].what} ${t[0].d ? `${t[0].d} m ${t[0].dir}` : 'at position'}` : ''), colour: t.length ? SIDE.hostile.colour : colour(e.callsign) } }
   }) })
   // A red ring around every unit with an enemy within WARN_M.
   map.getSource('threat').setData({ type: 'FeatureCollection', features: threatened.map(([e]) => ({
@@ -271,7 +271,7 @@ function speak(e) {
   else if (e.type === 'intent') msg = `${e.callsign}, copy intention.`
   else msg = `${e.callsign}, say again. ${e.note || ''}`
   // Warnings come first: "Warning. Alpha two, enemy tank 200 metres north of you."
-  const warn = (e.threats || []).map((w) => `${w.callsign}, ${describeContact({ ...w.contact, activity: null }, { spoken: true })} ${w.distance_m} metres ${w.direction} of you.`)
+  const warn = (e.threats || []).map((w) => `${w.callsign}, ${describeContact({ ...w.contact, activity: null }, { spoken: true })} ${w.distance_m ? `${w.distance_m} metres ${w.direction} of you` : 'at your position'}.`)
   if (warn.length) msg = `Warning. ${warn.join(' ')} ${msg}`
   window.speechSynthesis.cancel()             // never queue up old read-backs behind the new one
   const u = new SpeechSynthesisUtterance(msg)
@@ -747,7 +747,7 @@ onUnmounted(() => {
           <div v-if="isContact(e)" class="contact" :style="{ color: sideOf(e.contact).colour }">⚠ {{ describeContact(e.contact) }}
             <span v-if="e.merged_with" class="assumed">same as {{ e.callsign }}, seen by {{ e.seen_by.join(', ') }}</span></div>
           <div v-for="w in e.threats || []" :key="w.callsign + (w.track || '')" class="warn">
-            ⚠ {{ w.callsign }}: {{ describeContact({ ...w.contact, activity: null }) }} {{ w.distance_m }} m {{ w.direction }}</div>
+            ⚠ {{ w.callsign }}: {{ describeContact({ ...w.contact, activity: null }) }} {{ w.distance_m ? `${w.distance_m} m ${w.direction}` : 'at position' }}</div>
           <div v-if="e.ok" class="read">→ {{ (e.parsed?.relation || '').replaceAll('_', ' ') }} <b>{{ e.anchor }}</b> · ±{{ e.radius_m }} m
             <span class="gridref">{{ mgrsAt(e.centre, { radius: e.radius_m }) }}</span></div>
           <div v-if="e.superseded" class="note">corrected by a later report</div>
