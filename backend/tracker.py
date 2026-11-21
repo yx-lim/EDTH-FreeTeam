@@ -18,10 +18,14 @@ from .geo import Gazetteer, norm
 from .resolver import resolve
 
 
+HOLD_S = 120   # how long a report with no callsign waits for the station to say who it is
+
+
 class Tracker:
     def __init__(self, gaz: Gazetteer, log: Path | None = None):
         self.gaz, self.log = gaz, log
         self.events: list[dict] = []
+        self.pending: dict | None = None   # the last report heard with no callsign, held until someone claims it
         # callsign -> fixes still standing, oldest first: (event id, region in metres, time)
         self.history: dict[str, list[tuple[int, BaseGeometry, float]]] = {}
         if log and log.exists():
@@ -39,6 +43,11 @@ class Tracker:
         named = bool(speaker or parsed["speaker"])
         if not named and all(r["type"] == "other" for r in parsed["reports"]):
             return []   # chatter ("hello hello"): no callsign, no place, no procedure. Nothing to log or plot.
+        if not named and not default_callsign:
+            return [self._hold(text, parsed, now, source, stt)]
+        held = self.pending if self.pending and now - self.pending["t"] <= HOLD_S else None
+        if held and speaker is None and parsed["speaker"] and all(r["type"] == "other" for r in parsed["reports"]):
+            return await self._claim(held, parsed["speaker"], now, source, stt)   # push-to-talk only; the net has its own
         speaker = speaker or parsed["speaker"] or (norm(default_callsign) if default_callsign else None) or "unit 1"
         by_subject: dict[str, list[dict]] = {}
         for r in parsed["reports"]:
@@ -52,6 +61,25 @@ class Tracker:
                                      "total": round((time.perf_counter() - t0) * 1000) + ((stt or {}).get("stt_ms") or 0)})
             self._write({"kind": "event", **event})
             out.append(event)
+        return out
+
+    def _hold(self, text: str, parsed: dict, now: float, source: str, stt: dict | None) -> dict:
+        """A report with no callsign and no default to fall back on: plotting it on a guessed unit would put a team
+        in the wrong place, so it is logged, not plotted, and the station is asked to say who it is (as an operator
+        would: "Station calling, say again your callsign")."""
+        event = self.note("unidentified", None, text, now, "unidentified", source=source, transcript_meta=stt,
+                          extractor=parsed.get("extractor"), note="callsign not heard: say again your callsign",
+                          _reports=parsed["reports"])
+        self.pending = event
+        return event
+
+    async def _claim(self, held: dict, speaker: str, now: float, source: str, stt: dict | None) -> list[dict]:
+        """The reply to "say again your callsign" ("This is Delta three"): the held report becomes theirs."""
+        self.pending = None
+        out = await self.ingest(held["text"], now=now, source=source, stt=stt, speaker=speaker,
+                                parsed={"speaker": speaker, "reports": held["_reports"], "extractor": held.get("extractor")},
+                                extra={"identifies": held["id"]})
+        self.annotate(held["id"], identified_as=speaker)
         return out
 
     def note(self, callsign: str, speaker: str | None, text: str, now: float, type: str, **fields) -> dict:
@@ -77,6 +105,7 @@ class Tracker:
     def reset(self) -> None:
         self.events.clear()
         self.history.clear()
+        self.pending = None
         self._write({"kind": "reset", "t": time.time()})
 
     def units(self) -> dict[str, BaseGeometry]:

@@ -169,6 +169,10 @@ function add(event) {
   events.value.push(event)
   if (atEnd) cursor.value = events.value.length
   if (event.ok) map?.easeTo({ center: event.centre, duration: 600 })
+  if (event.identifies) {                     // "This is Delta three" claimed a report held for lack of a callsign
+    const held = events.value.find((x) => x.id === event.identifies)
+    if (held) { held.identified_as = event.callsign; events.value = [...events.value] }
+  }
 }
 
 // Read-back, radio style, so the speaker hears what the map understood. Only the screen that sent the report speaks
@@ -176,7 +180,8 @@ function add(event) {
 function speak(e) {
   if (!readBack.value || !window.speechSynthesis || e.source?.startsWith('radio')) return   // the net would hear itself
   let msg
-  if (e.ok) msg = `${e.callsign}, ${e.parsed?.relation === 'at' ? 'at' : (e.parsed?.relation || '').replaceAll('_', ' ')} ${e.anchor}`
+  if (e.type === 'unidentified') msg = lang.value === 'fr' ? 'Station qui appelle, répétez votre indicatif.' : 'Station calling, say again your callsign.'
+  else if (e.ok) msg = `${e.callsign}, ${e.parsed?.relation === 'at' ? 'at' : (e.parsed?.relation || '').replaceAll('_', ' ')} ${e.anchor}`
   else if (e.type === 'intent') msg = `${e.callsign}, copy intention.`
   else msg = `${e.callsign}, say again. ${e.note || ''}`
   window.speechSynthesis.cancel()             // never queue up old read-backs behind the new one
@@ -640,7 +645,7 @@ onUnmounted(() => {
 
       <ol v-else class="log">
         <li v-for="e in [...visible].reverse()" :key="e.id"
-          :class="{ bad: !e.ok && !['intent', 'order'].includes(e.type), amb: e.ambiguous, intent: ['intent', 'order'].includes(e.type), gone: e.superseded }">
+          :class="{ bad: !e.ok && !e.identified_as && !['intent', 'order'].includes(e.type), amb: e.ambiguous, intent: ['intent', 'order'].includes(e.type), gone: e.superseded }">
           <div class="meta">
             <b :style="{ color: colour(e.callsign) }">{{ e.callsign }}</b>
             <span v-if="e.callsign_assumed" class="assumed" title="No callsign was said; taken from the Default callsign box">(assumed)</span>
@@ -655,7 +660,9 @@ onUnmounted(() => {
           <div v-if="e.ok" class="read">→ {{ (e.parsed?.relation || '').replaceAll('_', ' ') }} <b>{{ e.anchor }}</b> · ±{{ e.radius_m }} m
             <span class="gridref">{{ mgrsAt(e.centre, { radius: e.radius_m }) }}</span></div>
           <div v-if="e.superseded" class="note">corrected by a later report</div>
-          <div v-if="e.note" class="note">{{ e.note }}</div>
+          <div v-if="e.identified_as" class="tick">✓ identified as {{ e.identified_as }}</div>
+          <div v-else-if="e.note" class="note">{{ e.note }}</div>
+          <div v-if="e.identifies" class="assumed">callsign given after “say again”</div>
           <div v-if="e.alternatives?.length" class="note">Could also be: {{ e.alternatives.join(', ') }}</div>
           <div v-if="e.ok && !e.superseded" class="actions">
             <button v-if="!e.confirmed" type="button" class="confirm" @click="confirm(e)">Confirm</button>

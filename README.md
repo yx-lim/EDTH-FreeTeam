@@ -35,6 +35,10 @@ Without a `MISTRAL_API_KEY` in `.env` everything runs offline apart from the map
 extractor (English and French) and the browser's speech recognition. Copy `.env.example` to `.env` to use
 Mistral for extraction and Voxtral for speech-to-text, or `pip install faster-whisper` for local Whisper.
 
+No callsign heard (noise, a clipped start)? With the **Default callsign** box filled in, the report goes to that unit,
+marked "(assumed)" and drawn dashed until confirmed. With it empty, the report is held, not plotted, and the map reads
+back "Station calling, say again your callsign". A reply such as "This is Delta three" within two minutes claims it.
+
 ## Radio-net mode
 
 Open the **Radio net** tab and press **Listen to the net**, or **Play a recording**. Nobody presses a button per
