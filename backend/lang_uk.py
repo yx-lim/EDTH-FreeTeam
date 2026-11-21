@@ -158,7 +158,36 @@ def callsign(raw: str | None) -> str | None:
         if any(same_word(fold(head), fold(n)) and len(fold(head)) - len(fold(n)) <= 2 for n in [canon, *alts]):
             head = canon.lower()
             break
+    else:
+        head = sound_alike(head) or head
     return " ".join([head, *rest])
+
+
+# Voiced and voiceless pairs blur on a noisy radio (д/т, б/п, з/с, г/х/к, ж/ш), and an unstressed о sounds like а.
+_SOUND = str.maketrans({"д": "т", "б": "п", "з": "с", "г": "к", "ґ": "к", "х": "к", "ж": "ш", "в": "ф", "о": "а",
+                        "ц": "с", "щ": "ш"})
+
+
+def sound_key(word: str) -> str:
+    return re.sub(r"(.)\1+", r"\1", fold(word).translate(_SOUND))
+
+
+def sound_alike(word: str) -> str | None:
+    """A misheard nickname -> the callsign in the operator's table it sounds like ("Гранід" -> "граніт", "Сакіл" ->
+    "сокіл"). Only for words of 4+ letters, only when one callsign clearly wins; otherwise None (keep as heard)."""
+    import difflib
+
+    k = sound_key(word)
+    if len(k) < 4:
+        return None
+    scored = sorted(((difflib.SequenceMatcher(None, k, sound_key(n)).ratio(), canon)
+                     for canon, alts in _CALLSIGNS.items() for n in [canon, *alts]
+                     if len(sound_key(n)) >= 4), reverse=True)
+    if not scored or scored[0][0] < 0.8:
+        return None
+    best = scored[0]
+    rival = next((sc for sc, c in scored[1:] if c != best[1]), 0)
+    return best[1].lower() if best[0] - rival >= 0.1 else None
 
 
 def callsign_names() -> list[str]:

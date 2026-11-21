@@ -37,7 +37,18 @@ CATEGORY_WORDS = {
     "theatre": "theatre", "theater": "theatre",
     "market": "market", "marche": "market",
     "bridge": "bridge", "pont": "bridge",
+    "cafe": "cafe", "coffee": "cafe", "restaurant": "restaurant", "brasserie": "restaurant", "bistro": "restaurant",
+    "bar": "bar", "pub": "bar", "pharmacy": "pharmacy", "pharmacie": "pharmacy", "chemist": "pharmacy",
+    "bank": "bank", "banque": "bank", "post": "post office", "poste": "post office", "police": "police",
+    "commissariat": "police", "library": "library", "bibliotheque": "library", "cinema": "cinema",
+    "hotel": "hotel", "supermarket": "supermarket", "bakery": "bakery", "boulangerie": "bakery",
+    "embassy": "embassy", "ambassade": "embassy", "statue": "statue", "monument": "monument", "memorial": "memorial",
+    "bookshop": "bookshop", "bookstore": "bookshop", "librairie": "bookshop",
 }
+# Small, numerous places (1,400 restaurants, 460 cafes...): matched only by their exact name, never by a fuzzy guess
+# or a shortened phrase, so a misheard landmark is not quietly turned into some bistro.
+MINOR = {"cafe", "restaurant", "bar", "hotel", "bookshop", "statue", "bakery", "pharmacy", "bank", "car park",
+         "supermarket", "memorial"}
 # Words that carry no identity in a place name.
 STOP = {"the", "la", "le", "l", "les", "de", "du", "des", "d", "of", "a", "au", "aux"}
 # Spoken variants folded onto the form OSM uses.
@@ -53,6 +64,27 @@ def norm(text: str) -> str:
 
 def words(text: str) -> list[str]:
     return [FOLD.get(t, t) for t in norm(text).split() if t not in STOP]
+
+
+def skeleton(word: str) -> str:
+    """What a word sounds like, roughly, for English and French names: its first letter and its consonants.
+    "odin" / "odeon" -> "odn", "sulpis" / "sulpice" -> "slps", "luxemburg" / "luxembourg" -> "lksmbrk"."""
+    w = norm(word).replace(" ", "")
+    for a, b in (("ph", "f"), ("qu", "k"), ("ck", "k"), ("x", "ks"), ("w", "v"), ("z", "s"), ("y", "i"),
+                 ("gn", "n"), ("th", "t"), ("g", "k")):
+        w = w.replace(a, b)
+    w = re.sub(r"c(?=[eiy])", "s", w).replace("c", "k")
+    w = w.replace("h", "")
+    w = re.sub(r"(?<=.)[aeiou]+", "", w)          # vowels blur first on a radio; keep the first letter
+    w = re.sub(r"(?<=.{3})[std]$", "", w)         # French silent final consonant: "Saint-Germain-des-Pres(t)"
+    return re.sub(r"(.)\1+", r"\1", w)
+
+
+def sounds_like(a: str, b: str) -> bool:
+    if len(a) < 3 or len(b) < 3 or a[0] != b[0] and {a[0], b[0]} - set("aeiou"):
+        return False
+    ka, kb = skeleton(a), skeleton(b)
+    return len(ka) >= 3 and (ka == kb or (min(len(ka), len(kb)) >= 4 and difflib.SequenceMatcher(None, ka, kb).ratio() >= 0.85))
 
 
 def similar(a: str, b: str) -> bool:
@@ -84,8 +116,15 @@ class Place:
     aliases: list[str] = field(default_factory=list)   # other spoken names (codenames: "Вторая посадка")
     seeded: bool = False                               # loaded from data/codenames.json, not added by the operator
 
+    alt_words: list[list[str]] = field(default_factory=list)   # words of each Latin-script alias
+
     def __post_init__(self):
         self.words = self.words or words(self.name)
+        self.alt_words = [words(a) for a in self.aliases if not lang_uk.has_cyrillic(a)]
+
+    @property
+    def minor(self) -> bool:
+        return self.category in MINOR
 
     @property
     def key(self) -> str:
@@ -104,7 +143,8 @@ class Gazetteer:
         self.bbox = raw.get("bbox")
         self.proj = Proj(lat0, lon0)
         self.places = [
-            Place(p["name"], p["kind"], p.get("category", ""), self.proj.to_xy(shape(p["geometry"])))
+            Place(p["name"], p["kind"], p.get("category", ""), self.proj.to_xy(shape(p["geometry"])),
+                  aliases=p.get("aliases", []))
             for p in raw["places"]
         ]
         # OSM sometimes spells one street two ways ("Rue de Rennes" / "rue de rennes"): merge them.
@@ -161,8 +201,8 @@ class Gazetteer:
         alias table and operator points with their aliases, never the open list of OSM names."""
         if self._cyr is None:
             names = {k: v for k, v in self._spoken.items() if lang_uk.has_cyrillic(k)}
-            for p in self.places:
-                if p.category == "custom":
+            for p in self.places:   # codenames, and landmarks with a Ukrainian or Russian name in OSM ("Шатле")
+                if p.category == "custom" or not p.minor:
                     names.update({n: p.name for n in [p.name, *p.aliases] if lang_uk.has_cyrillic(n)})
             self._cyr = lang_uk.index_of(names)
         return self._cyr
@@ -198,28 +238,43 @@ class Gazetteer:
         pool = [p for p in self.places if kind in (None, "intersection", "unit", p.kind)] or self.places
 
         def score(p: Place) -> int:
-            if p.words == tokens:
-                return 0
-            if tokens and all(t in p.words for t in tokens):
-                return 1
-            if wanted and p.category == wanted and all(t in p.words for t in named):
-                return 2 if named else 3   # "saint sulpice church" beats a bare "the church"
-            return 9
+            best = 9
+            for i, pw in enumerate((p.words, *p.alt_words)):   # its name, or another name it is known by
+                if pw == tokens:
+                    if i == 0:
+                        return 0
+                    best = min(best, 1)   # exact on an alias: behind a place actually called that ("Panthéon")
+                    continue
+                # a bare category word ("the market") is matched by category below, not by any name containing it
+                if tokens and named and all(t in pw for t in tokens) and not (p.minor and wanted != p.category):
+                    best = min(best, 1)
+                elif wanted and p.category == wanted and all(t in pw for t in named):
+                    best = min(best, 2 if named else 3)   # "saint sulpice church" beats a bare "the church"
+            return best
 
         hits = [(s, p) for p in pool if (s := score(p)) < 9]
         if not hits and named:
             # Transcription slips ("Rude Rennes", "Saint Germain de Pre"): every spoken word must be close to a
             # word of the place, and at least one must match exactly.
             for p in pool:
-                if wanted and p.category != wanted:
+                if (wanted and p.category != wanted) or p.minor:
                     continue
                 if all(any(similar(t, w) for w in p.words) for t in named) and any(t in p.words for t in named):
                     hits.append((4, p))
         if wanted and any(p.category == wanted for _, p in hits):
             hits = [(s, p) for s, p in hits if p.category == wanted]
         if not hits:
-            close = difflib.get_close_matches(norm(name), {p.key for p in pool}, n=3, cutoff=0.8)
-            hits = [(5, p) for p in pool if p.key in close]
+            close = difflib.get_close_matches(norm(name), {p.key for p in pool if not p.minor}, n=3, cutoff=0.8)
+            hits = [(5, p) for p in pool if p.key in close and not p.minor]
+        if not hits and shrink and named and any(len(t) >= 3 for t in named):   # whole phrase only
+            # Sound-alikes ("the Odin" for Odéon): every spoken word must sound like a word of the place. Landmarks
+            # and streets only; the resolver marks the result for the duty officer to confirm.
+            spoken = [t for t in named if len(t) >= 3]
+            for p in pool:
+                if p.minor or (wanted and p.category != wanted):
+                    continue
+                if all(any(sounds_like(t, w) for pw in (p.words, *p.alt_words) for w in pw) for t in spoken):
+                    hits.append((6, p))
         if not hits and kind is not None:
             return self.find(name, near=near, kind=None, shrink=shrink)   # the kind guess was wrong; retry
         if not hits and shrink:
@@ -227,15 +282,28 @@ class Gazetteer:
             # drop words from the end until a place matches.
             toks = norm(name).split()
             for k in range(len(toks) - 1, 0, -1):
-                found = self.find(" ".join(toks[:k]), near=near, kind=None, shrink=False)
+                found = [p for p in self.find(" ".join(toks[:k]), near=near, kind=None, shrink=False) if not p.minor]
                 if found:
                     return found
             return []
         # Best score, then nearest to the unit's last position, then footprints before points, then bigger first
         # (a speaker saying "the church" means the landmark, not a chapel inside a school).
-        hits.sort(key=lambda sp: (sp[0], round(sp[1].geom.distance(near)) if near is not None else 0,
+        # Within about 100 m, the name with fewest extra words wins ("Odéon" over "MK2 Odéon (côté Saint-Germain)").
+        def dist(p: Place) -> float:
+            return p.geom.distance(near) if near is not None else 0
+
+        # A fuzzy or sound-alike match: the plainest name first, wherever it is ("Odin" -> "Odéon", not a cinema).
+        hits.sort(key=lambda sp: (sp[0], sp[1].minor, len(sp[1].words) if sp[0] >= 4 else 0, round(dist(sp[1]) / 100),
+                                  len(sp[1].words) if sp[0] == 2 else 0, round(dist(sp[1])),
                                   sp[1].geom.geom_type == "Point", -sp[1].size))
         return [p for _, p in hits]
+
+    def by_sound(self, name: str, place: Place) -> bool:
+        """True when `name` reached `place` only through a sound-alike match (worth a "did you mean" check)."""
+        spoken = [t for t in words(name) if t not in CATEGORY_WORDS and len(t) >= 3]
+        names = [w for pw in (place.words, *place.alt_words) for w in pw]
+        return bool(spoken) and not all(any(similar(t, w) for w in names) for t in spoken) \
+            and place.key not in self.aliases.values() and norm(name) not in self.aliases
 
     # --- walking routes over the named-street network -------------------------------------------
     def _graph(self):

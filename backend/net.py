@@ -26,7 +26,7 @@ from pathlib import Path
 
 from shapely.geometry import Point, shape
 
-from . import lang_uk
+from . import callsign, lang_uk
 from .extract import _CS, _callsign, _parse_clause, _prep, extract
 from .resolver import resolve
 from .tracker import Tracker
@@ -165,6 +165,7 @@ class Net:
 
     # --- one transmission ----------------------------------------------------------------------
     async def _one(self, text: str, t: float, end: float, source: str, stt: dict | None) -> dict:
+        text = callsign.snap(text)   # "this is Alfa won" -> "this is Alpha 1" (backend/callsign.py)
         prepped = _prep(text)
         cyrillic = lang_uk.cyrillic_share(text) > 0.3
         to, frm, single, body, how = lang_uk.header(text) if cyrillic else header(prepped)

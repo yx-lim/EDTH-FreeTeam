@@ -130,6 +130,14 @@ teammate's list; rows marked `check` are unverified).
 | "I'll be at Odéon in five minutes" / "holding position" / "back where I was ten minutes ago" | not a move / same place / from history |
 | "I'm with Alpha one", "50 m north of Bravo two" | another unit as the anchor |
 | "Rude Rennes", "San Sulpice", "Medici fountain", "town hall" | fuzzy and alias matching (`data/aliases.json`) |
+| "the Odin", "Saint Germain de Pray" | matched by sound (Odéon, Saint-Germain-des-Prés), plotted dashed with "confirm" |
+| "this is Alfa won", "Charly too", "fox trot three" | misheard NATO callsigns snapped back (Alpha 1, Charlie 2, Foxtrot 3) |
+| "Гранід", "Сакіл" | a Ukrainian/Russian nickname matched by sound to the callsign table (Граніт, Сокіл) |
+| "100 yards", "300 feet", "half a click", "two blocks", "five minutes' walk", "a couple hundred metres" | converted to metres; approximate ones widen the band |
+| "between 200 and 300 metres east of …", "about 200 m …" | a distance range / a wider band |
+| "bearing 045, 300 m from …", "azimuth 1600 mils", "north-northeast of …" | a narrow 30° wedge on that bearing |
+| "400 metres from the Panthéon" | a ring around it (no direction said) |
+| "opposite", "across the street from", "inside", "in the area of", "past", "short of", "left / right of" | band outside the walls, the footprint, a wide circle, far / near side and left / right seen from the last position |
 | "checkpoint 3" after right-clicking the map to name it | operator-named points, valid at once |
 | "at the Eiffel Tower", "roger, out" | flagged, never plotted |
 
@@ -144,7 +152,8 @@ is silent. The event log (`data/events.jsonl`) is replayed on restart.
 | `backend/extract.py` | Transcript to transmission `{speaker, reports[]}` (Gemini or Mistral, falls back to rules on any error) |
 | `backend/tracker.py` | Per-callsign state, corrections, holding/intent/history, combining clues, event log and replay |
 | `backend/resolver.py` | One report to a region; one rule per spatial relation; speed check |
-| `backend/geo.py` | Gazetteer: aliases, fuzzy names, custom points, street graph and walking regions |
+| `backend/geo.py` | Gazetteer: aliases, fuzzy and sound-alike names, OSM alternative names, custom points, street graph and walking regions |
+| `backend/callsign.py` | Misheard NATO callsigns back to canonical form ("Alfa won" → Alpha 1), by sound |
 | `backend/stt.py` | Speech-to-text, switchable at run time (`GET/POST /stt`): ElevenLabs Scribe, Gemini, Voxtral with place-name vocabulary (`context_bias`), or local faster-whisper |
 | `backend/net.py` | Radio-net mode: split at "over"; speaker, addressee and kind (report, request, order, ack, say again, radio check); acks, repeats, taskings |
 | `backend/vad.py`, `frontend/src/vad.js` | Energy voice-activity detection that cuts a channel into transmissions (server for recordings, browser live) |
@@ -210,6 +219,17 @@ What this repo can do now, grouped by area. Updated after each major implementat
 - Grid references read out loud ("three one uniform…") place a report directly, for own units and contacts.
 - Military map look: NATO symbols, MGRS grid overlay, dark, satellite and topo base maps.
 - A confirm step before an unconfirmed report goes on the map.
+- **Bigger, richer place list**: 5,700 places over about 3 × 3 km (was 385 over 1.2 km), from Notre-Dame and the
+  Panthéon to Montparnasse: landmarks, streets, stations, cafés, restaurants, pharmacies, hotels, statues. Other names
+  from OpenStreetMap (English, short, old, Ukrainian/Russian such as "Шатле") count too. Small, numerous places
+  (cafés, restaurants…) only match their exact name, never a guess. Rebuild with `scripts/fetch_district.py`.
+- **Misheard names**: callsigns snapped to the NATO alphabet by sound; places matched by sound as a last resort and
+  flagged for the duty officer. Ukrainian callsigns are personal nicknames (not letter + number), so those are
+  matched by sound against `data/callsigns.json`.
+- **More ways to say where**: bearings (degrees, mils, 16 compass points), distance ranges and units (yards, feet,
+  km, clicks, blocks, paces, minutes' walk), "about", "opposite", "inside", "in the area of", "past", "short of",
+  "left/right of", "N metres from". Held-out stress set (offline rules): plotted 19 → 47 of 61, callsign right
+  13 → 42 of 54.
 
 ### 5. Duty-officer queue and export
 - A **To confirm** panel lists every draft: single enemy sightings first, then other sightings, then doubtful unit
@@ -230,7 +250,7 @@ What this repo can do now, grouped by area. Updated after each major implementat
   gpt-4o-transcribe on degraded recordings and score callsigns, places and numbers. (Skip Voxtral: no Ukrainian.)
 
 **Make the map more honest**
-- A misheard place should show two candidate places for the officer to pick.
+- A misheard place should show two candidate places for the officer to pick (today: the best sound-alike, flagged).
 - Measure "truth was inside the circle X of 20" for the pitch slide.
 
 **Next features (by value)**

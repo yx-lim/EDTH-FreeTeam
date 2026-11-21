@@ -1,6 +1,6 @@
 """Replay the judge stress-test scenarios in tests/stress.jsonl and score them.
 
-    python -m scripts.stress              # Mistral extraction if MISTRAL_API_KEY is set, else the rules extractor
+    python -m scripts.stress              # Gemini/Mistral extraction if a key is set, else the rules extractor
     python -m scripts.stress --offline    # force the rules extractor
     python -m scripts.stress --all        # also list turns that passed
     python -m scripts.stress --holdout    # score tests/stress_holdout.jsonl instead; failing turns stay hidden
@@ -149,12 +149,13 @@ def summary(scores: list[dict]) -> dict:
 
 async def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--offline", action="store_true", help="use the rules extractor even if a Mistral key is set")
+    ap.add_argument("--offline", action="store_true", help="use the rules extractor even if a Gemini or Mistral key is set")
     ap.add_argument("--all", action="store_true", help="list every turn (with --holdout: also reveals its failures)")
     ap.add_argument("--holdout", action="store_true", help="score the held-out set; failing turns stay hidden unless --all")
     args = ap.parse_args()
     if args.offline:
-        os.environ.pop("MISTRAL_API_KEY", None)
+        for k in ("MISTRAL_API_KEY", "GEMINI_API_KEY"):
+            os.environ.pop(k, None)
 
     path = HOLDOUT if args.holdout else CASES
     scenarios = load(path)

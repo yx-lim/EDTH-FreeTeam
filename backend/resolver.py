@@ -30,6 +30,17 @@ def bearing(a: Point, b: Point) -> float:
     return math.degrees(math.atan2(b.x - a.x, b.y - a.y)) % 360
 
 
+def band(report: dict, base: float) -> tuple[float, float]:
+    """Inner and outer distance of a reported distance band, from the edge of the place. A spoken range ("200 to 300
+    metres") is used as said; an approximate one ("about 200") is widened; none at all means "close by"."""
+    lo, hi, d = report.get("distance_min_m"), report.get("distance_max_m"), report.get("distance_m")
+    if lo and hi:
+        return 0.85 * lo, 1.15 * hi + base
+    if d:
+        return (0.5 * d, 1.5 * d + base) if report.get("vague") else (0.7 * d, 1.3 * d + base)
+    return 0.5 * base, base + 100
+
+
 def footprint_radius(place: Place) -> float:
     return math.sqrt(place.geom.area / math.pi) if place.geom.area else 0.0
 
@@ -92,9 +103,13 @@ def resolve(report: dict, gaz: Gazetteer, last: BaseGeometry | None = None, elap
         if anchor.get("doubt"):
             notes.append(f"read back the grid: {anchor['doubt']}")
     else:
-        found = candidates(name, gaz, units, last_pt, anchor.get("kind"))
+        # No previous position: the middle of the mapped area (the projection origin) breaks ties, so "the church"
+        # is the one in the area of operations, not the biggest one on the map.
+        found = candidates(name, gaz, units, last_pt if last_pt is not None else Point(0, 0), anchor.get("kind"))
     if not found:
         return {"ok": False, "note": f"unknown place: {name!r}; say again or name a nearby street"}  # never guess
+    if found[0].kind not in ("unit", "grid") and gaz.by_sound(name, found[0]):
+        notes.append(f"heard {name!r}: taken as {found[0].name} (sounds alike); confirm")
     # Physics check: a unit on foot cannot cross the district in a minute. Prefer a reachable candidate; if none
     # is reachable, plot the best one but flag it, because the place was probably misheard.
     # (Not for movement: "towards X" names a destination, not where the unit is.)
@@ -109,36 +124,83 @@ def resolve(report: dict, gaz: Gazetteer, last: BaseGeometry | None = None, elap
             notes.append(f"implausible move: {jump:.0f} m in {elapsed_s:.0f} s; check the place name")
     place: Place = found[0]
     distinct = list(dict.fromkeys(p.name for p in found))
-    ambiguous = len(distinct) > 1 or any("implausible" in n or "read back" in n for n in notes)
+    ambiguous = len(distinct) > 1 or any("implausible" in n or "read back" in n or "sounds alike" in n for n in notes)
     centre_geom = place.geom.centroid
     dist = report.get("distance_m")
     base = footprint_radius(place)
 
     if relation == "intersection" or anchor.get("kind") == "intersection":
+        if place.kind != "street":   # "Rue de Rennes" is also a metro entrance: at a corner, the street is meant
+            place = next((p for p in [*found, *gaz.find(place.name, near=last_pt, kind="street")]
+                          if p.kind == "street" and p.key == place.key), place)
         other = gaz.find((report.get("anchor2") or {}).get("name", ""), near=place.geom, kind="street")
         if not other:
             return {"ok": False, "note": "second street of the intersection not found"}
-        crossing = place.geom.intersection(other[0].geom)
-        if crossing.is_empty:
-            # Streets that meet at a square often do not share a node in OSM: use their closest points.
-            a, b = nearest_points(place.geom, other[0].geom)
-            if a.distance(b) > 40:
-                return {"ok": False, "note": f"{place.name} and {other[0].name} do not meet in the map data"}
-            crossing = LineString([a, b]).centroid
-        region = crossing.centroid.buffer(20)
-        place = Place(f"{place.name} × {other[0].name}", "intersection", "", crossing)
-        ambiguous = False
+        a, b = nearest_points(place.geom, other[0].geom)
+        if place.kind == "street" and other[0].kind == "street" and a.distance(b) <= 40:
+            crossing = place.geom.intersection(other[0].geom)
+            if crossing.is_empty:
+                # Streets that meet at a square often do not share a node in OSM: use their closest points.
+                crossing = LineString([a, b]).centroid
+            region = crossing.centroid.buffer(20)
+            place = Place(f"{place.name} × {other[0].name}", "intersection", "", crossing)
+            ambiguous = False
+        elif a.distance(b) <= 400:
+            # "The crossing between the Odéon and the CCF": landmarks, not two streets. Read it as between them.
+            region = LineString([a, b]).buffer(25) if a.distance(b) > 1 else a.buffer(25)
+            notes.append(f"read as between {place.name} and {other[0].name}")
+            place = Place(f"{place.name} – {other[0].name}", "intersection", "", region)
+            ambiguous = True
+        else:
+            return {"ok": False, "note": f"{place.name} and {other[0].name} do not meet in the map data"}
     elif relation == "between":
         other = gaz.find((report.get("anchor2") or {}).get("name", ""), near=place.geom)
         if not other:
             return {"ok": False, "note": "second place not found"}
         region = LineString([centre_geom, other[0].geom.centroid]).buffer(25)
-    elif relation in BEARINGS:
+    elif relation in BEARINGS or (relation == "bearing" and report.get("bearing_deg") is not None):
         # Measured from the edge of the building, not its middle: "south of the church" is outside the church.
-        r_in, r_out = (0.7 * dist, 1.3 * dist + base) if dist else (0.5 * base, base + 100)
-        region = wedge(centre_geom, BEARINGS[relation], r_in, r_out)
+        # A numeric bearing or a 16-point direction is narrower than "north of" (which covers 70 degrees).
+        r_in, r_out = band(report, base)
+        if relation == "bearing":
+            region = wedge(centre_geom, float(report["bearing_deg"]) % 360, r_in, r_out, half_angle=15)
+            notes.append(f"bearing {round(float(report['bearing_deg'])):03d} from {place.name}")
+        else:
+            region = wedge(centre_geom, BEARINGS[relation], r_in, r_out)
         if place.geom.area:
             region = region.difference(place.geom.buffer(2))
+    elif relation == "from":
+        # A distance with no direction: a ring around the place.
+        if dist or report.get("distance_max_m"):
+            r_in, r_out = band(report, base)
+            region = centre_geom.buffer(r_out).difference(centre_geom.buffer(max(r_in, 0.1)))
+            notes.append("distance given without a direction: anywhere on the ring")
+        else:
+            region = place.geom.buffer(NEAR_M)
+        ambiguous = True
+    elif relation == "opposite":
+        # Across the street from it, on a side nobody said: a band just outside the walls.
+        region = place.geom.buffer(dist or 60).difference(place.geom.buffer(10))
+        ambiguous = True
+        notes.append("'opposite': which side was not said")
+    elif relation == "inside":
+        region = place.geom.buffer(3) if place.geom.area else place.geom.buffer(25)
+    elif relation == "around":
+        region = place.geom.buffer(dist or 150)
+        ambiguous = True
+    elif relation in ("left_of", "right_of"):
+        if last_pt is None or last_pt.distance(centre_geom) < 5:
+            region = place.geom.buffer(60).difference(place.geom.buffer(5))
+            ambiguous = True
+            notes.append(f"'{relation.replace('_', ' ')}' needs a viewpoint; no previous position known")
+        else:
+            b = bearing(last_pt, centre_geom) + (-90 if relation == "left_of" else 90)   # facing the place
+            r_in, r_out = band(report, base) if dist else (0.3 * base, base + 60)
+            region = wedge(centre_geom, b % 360, r_in, r_out, half_angle=45)
+            if place.geom.area:
+                region = region.difference(place.geom.buffer(2))
+            ambiguous = True
+            notes.append("left and right read as seen from the unit's previous position")
     elif relation in ("behind", "in_front_of"):
         if last_pt is None or last_pt.distance(centre_geom) < 5:
             region = place.geom.buffer(60).difference(place.geom.buffer(5))

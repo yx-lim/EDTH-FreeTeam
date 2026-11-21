@@ -16,7 +16,7 @@ import unicodedata
 
 import httpx
 
-from . import contact, grid, lang_uk
+from . import callsign, contact, grid, lang_uk
 from .geo import norm
 
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
@@ -26,7 +26,13 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 RELATIONS = ["at", "near", "behind", "in_front_of", "north_of", "south_of", "east_of", "west_of",
              "northeast_of", "northwest_of", "southeast_of", "southwest_of",
-             "between", "intersection", "towards", "along", "previous"]
+             "between", "intersection", "towards", "along", "previous",
+             "opposite", "inside", "around", "from", "bearing", "left_of", "right_of"]
+# Spoken compass points, 16 of them, as bearings clockwise from north.
+COMPASS = {"north": 0, "north northeast": 22.5, "northeast": 45, "east northeast": 67.5, "east": 90,
+           "east southeast": 112.5, "southeast": 135, "south southeast": 157.5, "south": 180, "south southwest": 202.5,
+           "southwest": 225, "west southwest": 247.5, "west": 270, "west northwest": 292.5, "northwest": 315,
+           "north northwest": 337.5}
 TYPES = ["position", "movement", "correction", "holding", "intent", "contact", "other"]
 
 SYSTEM = f"""You turn one radio transmission into JSON for a live map. It may be English or French, may contain
@@ -39,7 +45,14 @@ Return only a JSON object:
      "anchor": {{"name": place name as spoken (fix obvious transcription slips), "kind": "landmark" | "street" | "intersection" | "unit" | "grid"}} or null,
      "anchor2": same shape, only for "between" and "intersection", else null,
      "relation": one of {RELATIONS},
-     "distance_m": metres as a number if a distance is spoken ("two hundred metres" -> 200, "a block" -> 100), else null,
+     "distance_m": metres as a number if a distance is spoken, converted to metres ("two hundred metres" -> 200,
+                   "a block" -> 100, "half a click"/"half a kilometre" -> 500, "100 yards" -> 91, "300 feet" -> 91,
+                   "50 paces" -> 38, "five minutes' walk" -> 400, "a stone's throw" -> 50), else null,
+     "distance_min_m" / "distance_max_m": only for a spoken range ("200 to 300 metres", "between 2 and 3 hundred"),
+     "vague": true if the distance is approximate ("about", "roughly", "a couple of hundred", "a few hundred",
+              "maybe", "some"), else omit,
+     "bearing_deg": only for relation "bearing": degrees clockwise from north ("bearing 045" -> 45, "1600 mils" ->
+                    90, "north-northeast" -> 22.5),
      "minutes_ago": number, only for relation "previous" ("back where I was ten minutes ago"), else null,
      "confidence": 0 to 1}} ]}}
 Rules:
@@ -52,6 +65,15 @@ Rules:
   {{"name": "<the grid as spoken, digits and letters only, e.g. 512 110 or 31U DQ 512 110>", "kind": "grid"}},
   relation "at". If a landmark is also given for the same position, add "fallback": {{"anchor": that landmark,
   "relation": ..., "distance_m": ...}}. Never compute coordinates from a grid yourself.
+- Relations, with the words that mean them:
+  "at": at / in / on. "inside": inside / within / in the courtyard of / dans / всередині.
+  "near": near / next to / beside / by / outside / close to. "around": in the area of / somewhere around / in the
+  vicinity of / в районі. "opposite": opposite / across from / across the street from / facing / en face de /
+  навпроти. "behind": behind / past / beyond / on the far side of / the other side of / за. "in_front_of": in front
+  of / short of / just before / this side of / before reaching / перед. "left_of" / "right_of": to the left / right
+  of (from the speaker's side) / ліворуч / праворуч від. Compass "north_of" etc. for the 8 main points; for the 16-point
+  ones ("north-northeast of"), a numeric bearing ("bearing 120 from X", "azimuth 3200 mils"), use "bearing" with
+  bearing_deg. "from": a distance with no direction ("300 metres from the church", "five minutes from the station").
 - A place mentioned only as context ("can see the church", "not far from the market") is not the anchor.
 - Radio checks, acknowledgements ("roger", "wilco", "say again"): reports = [{{"type": "other", ...}}].
 - Something SEEN (enemy, vehicles, drones, aircraft, artillery, IEDs, civilians): a separate report with type "contact",
@@ -106,6 +128,7 @@ def model() -> tuple[str, str, str] | None:
 async def extract(text: str) -> dict:
     """Returns {"speaker", "reports": [...], "extractor", "extract_ms"}."""
     t0 = time.perf_counter()
+    text = callsign.snap(text)   # misheard NATO callsigns ("Alfa won") back to "Alpha 1" before anything reads them
     chosen = model()
     out = None
     if chosen:
@@ -163,7 +186,7 @@ def _callsign(text: str | None) -> str | None:
     t = norm(text)
     for w, d in _DIGITS.items():
         t = re.sub(rf"\b{w}\b", d, t)
-    return t or None
+    return callsign.canonical(t) or None   # "alfa 1" -> "alpha 1", "charly too" -> "charlie 2"
 
 
 def _enrich_uk(out: dict, text: str) -> None:
@@ -202,11 +225,17 @@ def validate(d: dict) -> dict:
         if "fallback" in r:
             fb = r["fallback"]
             r["fallback"] = fb if isinstance(fb, dict) and (fb.get("anchor") or {}).get("name") else None
-        for k in ("distance_m", "minutes_ago"):
+        for k in ("distance_m", "minutes_ago", "distance_min_m", "distance_max_m", "bearing_deg"):
+            if k not in r and k not in ("distance_m", "minutes_ago"):
+                continue
             try:
                 r[k] = float(r[k]) if r.get(k) is not None else None
             except (TypeError, ValueError):
                 r[k] = None
+        if r["relation"] == "bearing" and r.get("bearing_deg") is None:
+            r["relation"] = "around"   # a bearing nobody gave: say "somewhere around", never invent a direction
+        if r.get("distance_m") is None and r.get("distance_min_m") and r.get("distance_max_m"):
+            r["distance_m"] = (r["distance_min_m"] + r["distance_max_m"]) / 2
         r["subject"] = _callsign(r.get("subject") or r.get("callsign"))
         if r["type"] == "contact":
             r["subject"] = None   # a sighting is never a unit's own position
@@ -228,8 +257,13 @@ def _other() -> dict:
 _DIGITS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6", "seven": "7", "eight": "8",
            "nine": "9", "un": "1", "deux": "2", "trois": "3", "quatre": "4", "cinq": "5", "sept": "7", "huit": "8",
            "neuf": "9"}
-_CS = (r"(?:alpha|bravo|charlie|delta|echo|foxtrot|kilo|sierra|tango|zulu|zero|command|control|hq)"
-       rf"(?:\s+(?:\d+|{'|'.join(_DIGITS)})\b)?")
+_NUMBER = rf"(?:\d+|{'|'.join(_DIGITS)})"
+# Letters that are rarely ordinary words may stand alone ("this is Bravo"); the rest need their number ("Hotel 2"),
+# or "the hotel" would become a callsign. backend/callsign.py has already fixed misheard spellings.
+_CS = (r"(?:(?:alpha|bravo|charlie|delta|echo|foxtrot|kilo|sierra|tango|zulu|zero|command|control|hq)"
+       rf"(?:\s+{_NUMBER}\b)?"
+       r"|(?:golf|hotel|india|juliet|lima|mike|november|oscar|papa|quebec|romeo|uniform|victor|whiskey|xray|yankee)"
+       rf"\s+{_NUMBER}\b)")
 _NUMWORDS = {"zero": 0, "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
              "seven": 7, "eight": 8, "nine": 9, "ten": 10, "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40,
              "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90, "un": 1, "une": 1, "deux": 2,
@@ -237,7 +271,17 @@ _NUMWORDS = {"zero": 0, "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four":
              "cinquante": 50}
 _NW = "|".join(sorted(set(_NUMWORDS) | {"hundred", "thousand", "cent", "cents", "mille", "and", "et"}, key=len, reverse=True))
 _NUM = rf"(?:\d+(?:\.\d+)?|(?:\b(?:{_NW})\b\s*)+)"
-_UNIT = r"(?:m|meters?|metres?|yards?)"
+_UNIT = r"(?:m|meters?|metres?)"
+# Every spoken distance is rewritten to "<n> m" before the patterns run (see _distances): units, ranges, "about".
+_UNITS = {r"kilomet(?:re|er)s?|km|klicks?|clicks?": 1000, r"met(?:re|er)s?|m": 1, r"yards?|yds?": 0.9144,
+          r"feet|foot|ft": 0.3048, r"paces?|steps?": 0.75, r"blocks?": 100,
+          r"minutes?\s+(?:walk|on foot|away on foot)|mins?\s+walk|minutes? a pied": 80}
+_UNIT_ANY = "|".join(f"(?:{u})" for u in _UNITS)
+_APPROX = (r"(?:about|around|roughly|approximately|approx|some|maybe|perhaps|circa|nearly|almost|give or take|"
+           r"environ|a peu pres|a vue de nez|une?\s+(?=\d))")
+_COMPASS16 = r"(?P<c16>north northeast|east northeast|east southeast|south southeast|south southwest|west southwest|west northwest|north northwest)"
+_DIGIT_WORDS = {"zero": "0", "oh": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5", "six": "6",
+                "seven": "7", "eight": "8", "nine": "9", "niner": "9"}
 _DIRS = {"north": "north", "south": "south", "east": "east", "west": "west", "northeast": "northeast",
          "northwest": "northwest", "southeast": "southeast", "southwest": "southwest",
          "nord": "north", "sud": "south", "est": "east", "ouest": "west"}
@@ -246,7 +290,10 @@ _DIR_FR = r"(?P<dir>nord|sud|est|ouest)"
 _ART = r"(?:(?:the|la|le|l|les|de|du|des)\s+)*"
 
 # (pattern, relation); a None relation is filled from the direction group. Order matters: most specific first.
+_BEARING = r"(?:on\s+)?(?:a\s+)?(?:grid\s+|magnetic\s+)?(?:bearing|azimuth|azimut|cap)\s+(?P<deg>\d{1,4}(?:\.\d)?)\s*(?P<bu>degrees?|deg|mils?)?"
 _PATTERNS = [
+    (rf"(?:(?P<d>{_NUM})\s*{_UNIT}\s+)?{_BEARING}\s*,?\s*(?:(?P<d2>{_NUM})\s*{_UNIT}\s+)?(?:from|of|de|du|des|depuis)\s+{_ART}(?P<a>.+)", "bearing"),
+    (rf"(?:(?P<d>{_NUM})\s*{_UNIT}\s+)?(?:to the\s+)?{_COMPASS16}(?:\s+side)?(?:\s+of)?\s+(?P<a>.+)", "bearing"),
     (rf"(?:corner|intersection|crossing|junction) of {_ART}(?P<a>.+?) and {_ART}(?P<b>.+)", "intersection"),
     (rf"(?:carrefour|coin|croisement|angle) {_ART}(?P<a>.+?) et {_ART}(?P<b>.+)", "intersection"),
     (rf"\bbetween {_ART}(?P<a>.+?) and {_ART}(?P<b>.+)", "between"),
@@ -256,6 +303,15 @@ _PATTERNS = [
     (rf"\b(?:to the\s+|on the\s+)?{_DIR_EN}(?:\s+side)?(?:\s+of)?\s+(?P<a>.+)", None),
     (rf"\b(?:au|a l)\s*{_DIR_FR}\s+(?:de\s+|du\s+|des\s+)?(?P<a>.+)", None),
     (rf"\b(?:with|avec)\s+(?P<unit>{_CS})", "at"),
+    (rf"(?P<d>{_NUM})\s*{_UNIT}\s+(?:away\s+)?(?:from|de|du|des)\s+{_ART}(?P<a>.+)", "from"),
+    (rf"\ba\s+(?P<d>{_NUM})\s*{_UNIT}\s+(?:de|du|des)\s+(?P<a>.+)", "from"),
+    (r"\b(?:opposite|across (?:the (?:street|road|square) )?from|facing|en face (?:de|du|des))\s+(?P<a>.+)", "opposite"),
+    (r"\b(?:inside|within|in the (?:courtyard|grounds|garden|gardens|yard) of|a l interieur (?:de|du|des))\s+(?P<a>.+)", "inside"),
+    (r"\b(?:(?:just\s+)?past|beyond|on the (?:far|other) side of|the (?:far|other) side of|au dela (?:de|du|des))\s+(?P<a>.+)", "behind"),
+    (r"\b(?:(?:just\s+)?short of|just before|this side of|before reaching|before you reach|juste avant)\s+(?P<a>.+)", "in_front_of"),
+    (r"\b(?:(?:to|on) the left (?:of|side of)|left of|a gauche (?:de|du|des))\s+(?P<a>.+)", "left_of"),
+    (r"\b(?:(?:to|on) the right (?:of|side of)|right of|a droite (?:de|du|des))\s+(?P<a>.+)", "right_of"),
+    (r"\b(?:in the (?:area|vicinity|neighbourhood|neighborhood) of|somewhere (?:around|near)|around|aux alentours (?:de|du|des)|dans le secteur (?:de|du|des)|du cote (?:de|du|des))\s+(?!\d)(?P<a>.+)", "around"),
     (r"\b(?:moving|heading|going|moved|advancing|walking|proceeding|en route|headed)\s+(?:towards?|to|for)\s+(?P<a>.+)", "towards"),
     (rf"\b(?:vers|en direction\s+(?:de|du|des))\s+(?P<a>.+)", "towards"),
     (r"\b(?:moving|heading|going|moved|walking)\s+(?:along|down|up)\s+(?P<a>.+)", "along"),
@@ -264,7 +320,7 @@ _PATTERNS = [
     (r"\b(?:over|above|overhead|au dessus (?:de|du|des))\s+(?P<a>.+)", "at"),   # an aircraft or drone above a place
     (r"\b(?:in front of|devant)\s+(?P<a>.+)", "in_front_of"),
     (r"\b(?:near|next to|close to|by|beside|outside|not far from|pres (?:de|du|des)|a cote (?:de|du|des))\s+(?P<a>.+)", "near"),
-    (r"\b(?:at|in|on|inside|au|aux|a la|a l|sur|dans)\s+(?P<a>.+)", "at"),
+    (r"\b(?:at|in|on|au|aux|a la|a l|sur|dans)\s+(?P<a>.+)", "at"),
 ]
 _HOLDING = r"\b(?:holding|hold position|no change|same position|stationary|static|je ne bouge pas|pas de changement|toujours au meme endroit)\b"
 _INTENT = r"\b(?:i ll be|i will be|will be at|we ll be|going to be|eta|je serai|nous serons)\b"
@@ -324,7 +380,59 @@ def _anchor(name: str | None) -> dict | None:
     return {"name": name, "kind": kind}
 
 
+def _distances(clause: str) -> tuple[str, dict]:
+    """Spoken distances -> "<n> m", so one set of patterns serves every unit. Returns the clause and what it learnt:
+    {"vague": True} for approximate distances, and distance_min_m / distance_max_m for a range."""
+    info: dict = {}
+    c = clause
+    # Bearings read digit by digit: "bearing zero four five" -> "bearing 045"
+    c = re.sub(r"\b(bearing|azimuth|azimut|cap)\s+((?:(?:zero|oh|one|two|three|four|five|six|seven|eight|niner|nine)\b\s*){2,4})",
+               lambda m: f"{m.group(1)} " + "".join(_DIGIT_WORDS[w] for w in m.group(2).split()), c)
+    fixed = [(r"\bhalf (?:a |an )?(?:kilomet(?:re|er)|km|klick|click)\b", "500 m", False),
+             (r"\b(?:a )?(?:couple|coupla)(?: of)? hundred(?: (?:metres?|meters?|m))?\b", "200 m", True),
+             (r"\b(?:a )?few hundred(?: (?:metres?|meters?|m))?\b", "300 m", True),
+             (r"\b(?:a )?stone s throw(?: away)?\b", "50 m", True),
+             (r"\b(?:a )?(?:click|klick)\b(?! \d)", "1000 m", False)]
+    for pat, repl, vague in fixed:
+        if re.search(pat, c):
+            c = re.sub(pat, repl, c)
+            info["vague"] = info.get("vague") or vague
+
+    def unit_factor(u: str) -> float:
+        return next(f for pat, f in _UNITS.items() if re.fullmatch(pat, u))
+
+    def to_m(m: re.Match) -> str:
+        f = unit_factor(m.group("u"))
+        a = _number(m.group("n"))
+        if a is None:
+            return m.group(0)
+        if m.group("n2"):
+            b = _number(m.group("n2"))
+            if b is not None:
+                lo, hi = sorted((a * f, b * f))
+                info.update(distance_min_m=round(lo), distance_max_m=round(hi), vague=True)
+                return f"{round((lo + hi) / 2)} m"
+        if m.group("approx") or f in (80, 100, 0.75):   # minutes' walk, blocks and paces are rough by nature
+            info["vague"] = True
+        return f"{round(a * f)} m"
+
+    rng = rf"(?:between\s+)?(?P<n>{_NUM})\s*(?:to|or|and|-|a)\s*(?P<n2>{_NUM})"
+    c = re.sub(rf"(?P<approx>{_APPROX}\s+)?(?:{rng})\s*(?P<u>{_UNIT_ANY})\b", to_m, c)
+    c = re.sub(rf"(?P<approx>{_APPROX}\s+)?(?P<n>{_NUM}|a|an|one|two|three)\s*(?P<n2>)(?P<u>{_UNIT_ANY})\b", to_m, c)
+    return re.sub(r"\s+", " ", c).strip(), info
+
+
 def _parse_clause(clause: str) -> dict | None:
+    clause, info = _distances(clause)
+    r = _parse_clause_normalised(clause)
+    if r and info and r.get("anchor"):
+        r.update(info)
+        if r.get("distance_m") is None and info.get("distance_min_m"):
+            r["distance_m"] = (info["distance_min_m"] + info["distance_max_m"]) / 2
+    return r
+
+
+def _parse_clause_normalised(clause: str) -> dict | None:
     m = re.search(_PREVIOUS, clause)
     if m:
         return {**_other(), "type": "position", "relation": "previous", "minutes_ago": _number(m.group("n")),
@@ -345,10 +453,18 @@ def _parse_clause(clause: str) -> dict | None:
         a = _anchor(g.get("a"))
         if not a:
             continue
-        d = _number(g["d"]) if g.get("d") else None
-        return {"subject": None, "type": "movement" if rel in ("towards", "along") else "position",
-                "anchor": a, "anchor2": _anchor(g.get("b")), "relation": rel, "distance_m": d,
-                "minutes_ago": None, "confidence": 0.5}
+        d = g.get("d") or g.get("d2")
+        d = _number(d) if d else None
+        out = {"subject": None, "type": "movement" if rel in ("towards", "along") else "position",
+               "anchor": a, "anchor2": _anchor(g.get("b")), "relation": rel, "distance_m": d,
+               "minutes_ago": None, "confidence": 0.5}
+        if rel == "bearing":
+            if g.get("c16"):
+                out["bearing_deg"] = COMPASS[g["c16"]]
+            else:
+                deg = float(g["deg"])
+                out["bearing_deg"] = (deg * 360 / 6400 if (g.get("bu") or "").startswith("mil") or deg > 360 else deg) % 360
+        return out
     if re.search(_HOLDING, clause):
         return {**_other(), "type": "holding", "confidence": 0.6}
     return None
@@ -388,8 +504,10 @@ def stub_extract(text: str) -> dict:
         del before
     t = re.sub(r"\b(?:i m |i am |we re |we are )?not (?:at|near|by|in|on) [^,.;]*", " ", t)
 
+    # "bearing 045, 300 metres from the church": one clue, though said with a pause
+    t = re.sub(r"\b((?:bearing|azimuth|azimut|cap)\s+[\w ]{1,30}?(?:degrees?|mils?)?)\s*,\s*(?=[\w ]{1,30}?(?:from|de|du)\b)", r"\1 ", t)
     intent = bool(re.search(_INTENT, t))
-    clauses = re.split(rf"\s*[,.;]\s*|\s+(?=(?:i m|i am|we re|we are|je suis)\b)|\s+(?={_CS}\s+(?:is|est)\b)"
+    clauses = re.split(rf"\s*(?:[,;]|\.(?!\d))\s*|\s+(?=(?:i m|i am|we re|we are|je suis)\b)|\s+(?={_CS}\s+(?:is|est)\b)"
                        r"|\s+(?=(?:by|near|next to|close to|beside) (?:the )?\w)", t)   # "west side of X by the Y": two clues
     reports, current = [], None
     clauses = [c.strip() for c in clauses if c and c.strip()]
