@@ -139,7 +139,45 @@ is silent. The event log (`data/events.jsonl`) is replayed on restart.
 The stress set was used while tuning, so its pass rate is not a held-out accuracy figure. Write fresh
 sentences (ideally with Lysk) and mark their truth points on a map before quoting a number.
 
+## Built
+
+Updated after each major implementation; newest last.
+
+- **Radio-net mode:** listens to a whole channel with no button presses, cuts it into transmissions (voice-activity
+  detection) and works out the speaker from radio procedure and conversation order.
+- **Push-to-talk, made reliable:** one press sends one report; a report with no callsign gets "say again your
+  callsign" instead of a guess; no read-back echo; lost, stuck and leaked transmissions fixed, with a tested state machine.
+- **Offline speech-to-text:** local Whisper with no internet (audio decoding fixed, model preloaded).
+- **Military map look:** NATO symbols, MGRS grid, dark, satellite and topo base maps, a confirm step before plotting.
+- **Spoken grid references:** grids read out loud are plotted directly; a full stop between numbers counts as a pause.
+- **Ukrainian/Russian:** codenames with case endings ("від Сараю" → Сарай), one callsign table across spellings,
+  Cyrillic aliases, Ukrainian/Russian radio procedure and rule-based reports, a Ukrainian demo net.
+- **Contact reports:** enemy, unknown and civilian sightings with APP-6 frames; repeat sightings merge; nearby units
+  are warned; contacts fade by type.
+- **Team app patch:** `integrations/` adds spoken grid references to the team's React/Gemini app (for Sarthak to apply).
+
 ## Not done yet
+
+From research and the debate panel (21 Nov):
+
+- **Speech-to-text comparison:** ElevenLabs Scribe v3 vs Gemini vs gpt-4o-transcribe on radio-degraded audio
+  (`radio_effect.py`: narrow band, codec, noise, clipped first syllable). Score callsign, landmark and number accuracy,
+  not word error rate. Don't use Voxtral for Ukrainian (not listed).
+- **Team app bug:** stale threats never leave the map (it draws from the event list, not the fuser's state).
+- **Static hazards** (mines, cables, waiting drones) never auto-delete: they turn "unconfirmed, N h old".
+  No growing circles for fast movers; a direction arrow only when a heading is given.
+- **Misheard place:** show two candidate places for the officer to pick; read-back is suggested, never automatic.
+  Corroboration shrinks a circle only for independent reports, not relays.
+- **Calibration:** "truth inside the circle X of 20", labelled synthetic data.
+- **Duty-officer confirm queue:** radio call → pre-filled card → one key → map and NATO-format export.
+- **Landmarks by voice** ("позначка: спалений танк") and a dated code table (codenames change daily).
+- **Casualty card** built from 200/300 reports across several transmissions; strength shown as "last reported N, age X".
+- **Friendly drone corridors:** a time-limited corridor that warns nearby infantry.
+- **Route threats** for evacuation and supply: "last report X min ago", never coloured green or called safe.
+- **Lore-log adapter:** read a Lore-style log (time, speaker, text) and build the map and cards from it.
+- **Don't claim** Delta integration, a front-line accuracy percentage, or that Lore lacks Ukrainian.
+
+Earlier gaps:
 
 - Streaming speech-to-text (Voxtral realtime over WebSocket).
 - Radio-net transcription on real radio audio: the cutting, attribution and endpoints are tested, but speech-to-text on
