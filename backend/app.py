@@ -160,13 +160,18 @@ async def net_recording(request: Request, lang: str | None = None) -> dict:
         raise HTTPException(400, f"not a PCM WAV file: {err}") from err
     base = time.time() - (clips[-1][1] if clips else 0)
     out = []
+    failed = 0
     for start, end, clip in clips:
-        heard = await stt.transcribe(clip, net.vocabulary(), lang)
+        try:   # one clip the provider chokes on must not lose the rest of the recording
+            heard = await stt.transcribe(clip, net.vocabulary(), lang)
+        except Exception:
+            failed += 1
+            continue
         if heard["text"]:
             got = await publish_net(await net.hear(heard["text"], now=base + start, duration=end - start,
                                                    source="radio", stt=heard))
             out += got["transmissions"]
-    return {"segments": len(clips), "transmissions": out}
+    return {"segments": len(clips), "failed": failed, "transmissions": out}
 
 
 @app.post("/net/replay")

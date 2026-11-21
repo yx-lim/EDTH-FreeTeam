@@ -84,3 +84,10 @@ def test_a_destroyed_tank_is_still_a_tank_and_all_clear_is_not_an_obstacle():
     _, events, _ = run(["Zero, this is Bravo one, contact, enemy tank destroyed at the Odeon theatre, over",
                         "Zero, this is Bravo one, all clear at the Medici fountain, over"])
     assert events[0]["contact"]["what"] == "tank" and events[1]["type"] == "position"
+
+
+@pytest.mark.parametrize("line", ["Башня, я Лис, перекресток возле Сарая, приём.", "Вежа, я Лис, перехрестя біля Сараю, прийом."])
+def test_a_crossroads_is_not_a_blocked_road(line):
+    """"перекресток" must not be taken for "перекрыт": state words are matched strictly."""
+    _, events, _ = run([line])
+    assert [e["type"] for e in events] == ["position"] and events[0]["anchor"] == "Сарай"

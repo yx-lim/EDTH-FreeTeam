@@ -327,6 +327,9 @@ _PATTERNS = [
     (r"\b(?:at|in|on|au|aux|a la|a l|sur|dans)\s+(?P<a>.+)", "at"),
 ]
 _HOLDING = r"\b(?:holding|hold position|no change|same position|stationary|static|je ne bouge pas|pas de changement|toujours au meme endroit)\b"
+_NOT_SEEN = (r"\b(?:no (?:enemy|enemies|hostiles?|contacts?|movement|activity|sign|sightings?|tanks?|drones?|vehicles?|infantry|troops)"
+             r"|negative (?:contact|sighting)|nothing (?:seen|heard|observed|to report)|aucun ennemi|pas d ennemis?|rien a signaler)\b")
+_HEARSAY = r"\b(?:yesterday|last night|earlier today|(?:was|were|been) reported|reported (?:at|near|in|by|around)|reportedly|rumou?red|hier)\b"
 _INTENT = r"\b(?:i ll be|i will be|will be at|we ll be|going to be|eta|je serai|nous serons)\b"
 _PREVIOUS = rf"\bback (?:to )?where (?:i|we) (?:was|were)\s+(?P<n>{_NUM})\s*minutes? ago"
 _CORRECTION = r"\b(?:correction|negative|negatif|je corrige|je rectifie)\b"
@@ -507,6 +510,11 @@ def stub_extract(text: str) -> dict:
             t = f"at {t}"   # "at Odeon station, correction, Odeon theatre"
         del before
     t = re.sub(r"\b(?:i m |i am |we re |we are )?not (?:at|near|by|in|on) [^,.;]*", " ", t)
+
+    # "no enemy at the Odeon", "nothing seen", "enemy reported at the Pantheon yesterday": a place that is clear, or
+    # somebody else's old news. Neither is a sighting and neither says where the speaker is: the phrase is dropped.
+    t = ", ".join(seg for seg in re.split(r"\s*(?:[,;]|\.(?!\d))\s*", t) if seg and not re.search(_NOT_SEEN, seg)
+                  and not re.search(_HEARSAY, seg))
 
     # "bearing 045, 300 metres from the church": one clue, though said with a pause
     t = re.sub(r"\b((?:bearing|azimuth|azimut|cap)\s+[\w ]{1,30}?(?:degrees?|mils?)?)\s*,\s*(?=[\w ]{1,30}?(?:from|de|du)\b)", r"\1 ", t)

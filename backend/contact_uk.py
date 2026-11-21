@@ -31,7 +31,17 @@ def _load() -> list[dict]:
 
 
 ROWS = _load()
-_INDEX = lang_uk.index_of({r["spoken"]: str(i) for i, r in enumerate(ROWS)})
+# Threat nouns are matched with case endings ("ждуна", "міною"). The state of a place is said with participles
+# ("перекрито", "знищений"), and a loose match on those catches ordinary nouns ("перехрестя", "перекресток"), so
+# they are matched strictly: the listed form, give or take its ending.
+_INDEX = lang_uk.index_of({r["spoken"]: str(i) for i, r in enumerate(ROWS) if r["what"] != "obstacle"})
+
+
+def _strict(phrase: str) -> str:
+    return r"\b" + r"\s+".join(re.escape(w[:-1]) + r"\w{0,3}" if len(w) > 4 else re.escape(w) for w in fold(phrase).split()) + r"\b"
+
+
+_OBSTACLE_ROWS = [(re.compile(_strict(r["spoken"])), r) for r in ROWS if r["what"] == "obstacle"]
 _WORDS = _alt(*[r["spoken"] for r in ROWS]) if ROWS else r"(?!x)x"
 
 HOSTILE = _alt("ворог", "ворога", "ворожий", "ворожа", "ворожі", "противник", "противника", "вражеский", "вражеская",
@@ -41,6 +51,8 @@ TRIGGER = _alt("контакт", "бачу", "вижу", "спостерігаю
 COUNT_WORDS = {fold(k): v for k, v in {
     "двох": 2, "двоє": 2, "двоих": 2, "двое": 2, "трьох": 3, "троє": 3, "троих": 3, "трое": 3, "чотирьох": 4,
     "четверо": 4, "четверых": 4, "п'ятьох": 5, "пятеро": 5, "пятерых": 5, "групу": None, "группу": None}.items()}
+OWN = _alt("наш", "наша", "наше", "наші", "наши", "свій", "своя", "свої", "свой", "свои", "дружній", "дружня",
+           "дружественный", "дружественная")
 ANOTHER = _alt("ще один", "ще одна", "ще одне", "ещё один", "ещё одна", "еще один", "еще одна", "another")
 STATIC = _alt("стоїть", "стоит", "стоять", "сидить", "сидит", "висить", "висит", "зависла", "завис", "окопались",
               "лежить", "лежит", "чекає", "ждет")
@@ -64,7 +76,10 @@ def _dir_word(w: str) -> str | None:
 def threat(text: str) -> dict | None:
     """The vocabulary row for the first threat word in the text (longest phrase wins)."""
     hit = lang_uk.lookup(text, _INDEX)
-    return ROWS[int(hit)] if hit is not None else None
+    if hit is not None:
+        return ROWS[int(hit)]
+    t = fold(text)
+    return next((r for rx, r in _OBSTACLE_ROWS if rx.search(t)), None)
 
 
 def starts_contact(clause: str) -> bool:
@@ -97,13 +112,13 @@ OBJECTS = {"bridge": _alt("міст", "мост", "моста", "мосту", "�
            "building": _alt("будівля", "будинок", "здание", "дом")}
 
 
-_STATE_INDEX = [(r["detail"], lang_uk.index_of({r["spoken"]: "x"})) for r in ROWS if r["what"] == "obstacle"]
 _SEVERITY = ["destroyed", "blocked", "damaged", "reopened"]
 
 
 def obstacle_state(text: str) -> str | None:
     """"міст знищено, проїзду нема" names two states; the worst one is the news."""
-    said = {state for state, index in _STATE_INDEX if lang_uk.lookup(text, index)}
+    t = fold(text)
+    said = {r["detail"] for rx, r in _OBSTACLE_ROWS if rx.search(t)}
     return next((s for s in _SEVERITY if s in said), None)
 
 
@@ -118,7 +133,9 @@ def describe(text: str) -> dict:
         if w in COUNT_WORDS and COUNT_WORDS[w]:
             count = count or COUNT_WORDS[w]
     what = row["what"] if row else ("infantry" if count else "unknown")
+    # "наша пташка над Ромашкою": ours only when the speaker says so, right before the thing itself
     side = ("hostile" if re.search(rf"\b{HOSTILE}\b", t) or (row and row.get("side") == "hostile")
+            else "friendly" if re.search(rf"\b{OWN}\s+(?:\w+\s+)?{_WORDS}", t)
             else "neutral" if what == "civilians" else "unknown")
     head = heading(text)
     activity = ("firing" if re.search(rf"\b{FIRING}\b", t) else "static" if re.search(rf"\b{STATIC}\b", t)

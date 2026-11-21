@@ -99,7 +99,8 @@ def describe(clauses: list[str], number) -> dict:
     m = re.search(WHAT_RE, text)   # the first thing named; at one spot, the earlier entry in _WHAT wins
     what = m.lastgroup if m else "artillery" if re.search(r"\bincoming\b", text) else "unknown"
     side = ("hostile" if re.search(_HOSTILE, text) else "neutral" if re.search(_NEUTRAL, text)
-            else "friendly" if re.search(_FRIENDLY, text) else "unknown")
+            else "friendly" if re.search(_FRIENDLY, text) or re.search(rf"\b(?:our|own|notre|nos)\s+(?:\w+\s+)?(?:{WHAT_RE})", text)
+            else "unknown")
     count = None
     m = re.search(rf"(?P<n>\d+|\b(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|twelve|twenty|un|une|deux|trois|quatre|cinq|six|dix)\b)"
                   rf"\s+(?:(?:enemy|hostile|ennemis?|enemies|civilian|armou?red|light|heavy|small|large|\w+)\s+)?(?:{WHAT_RE})", text)

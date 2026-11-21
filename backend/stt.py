@@ -39,6 +39,16 @@ _whisper = None
 PROMPTS = {"en": "Radio position report. Places: ", "fr": "Compte rendu radio de position. Lieux : ",
            "uk": "Радіообмін. Вежа, я Сокіл, прийом. Позивні та орієнтири: ",
            "ru": "Радиообмен. Башня, я Сокол, приём. Позывные и ориентиры: "}
+
+
+def _prompt(language: str | None, vocabulary: list[str]) -> str:
+    """Auto language on a Ukrainian net: an English prompt pulls Whisper towards transliteration, so go by the
+    script of the callsigns and codenames it is being primed with."""
+    if language is None and any("\u0400" <= ch <= "\u04ff" for w in vocabulary[:40] for ch in w):
+        return PROMPTS["uk"]
+    return PROMPTS.get(language, PROMPTS["en"])
+
+
 _whisper_lock = threading.Lock()
 # One thread owns the model, so two quick presses queue rather than compete for the CPU.
 _whisper_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper")
@@ -173,7 +183,7 @@ async def _gemini(audio: bytes, vocabulary: list[str], language: str | None) -> 
 async def _local(audio: bytes, vocabulary: list[str], language: str | None) -> str:
     def run() -> str:
         segments, _ = _load_whisper().transcribe(_pcm(audio), language=language, vad_filter=True,
-                                          initial_prompt=PROMPTS.get(language, PROMPTS["en"]) + ", ".join(vocabulary[:40]))
+                                          initial_prompt=_prompt(language, vocabulary) + ", ".join(vocabulary[:40]))
         return " ".join(s.text for s in segments)
 
     return await asyncio.get_running_loop().run_in_executor(_whisper_thread, run)

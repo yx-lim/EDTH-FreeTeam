@@ -652,6 +652,38 @@ def _joins(text: str) -> str:
                   flags=re.I)
 
 
+# "біля Сараю противника немає", "не бачу нікого", "біля Сараю чисто": a statement that something is NOT there. And
+# "вчора там бачили танк", "кажуть, що ...": somebody else's old news. Neither is a sighting, and neither says where
+# the speaker is, so neither may put an enemy on the map or move the unit.
+NEGATED = _alt("нема", "немає", "нет", "нету", "не бачу", "не вижу", "не спостерігаю", "не наблюдаю", "не виявлено",
+               "не обнаружено", "чисто", "відсутній", "відсутні", "отсутствует", "отсутствуют", "нікого", "никого")
+HEARSAY = _alt("вчора", "вчера", "позавчора", "позавчера", "кажуть", "говорят", "повідомляли", "сообщали",
+               "за даними", "по данным", "раніше бачили", "раньше видели")
+# The clock method: "на третій годині від мене Сарай, метрів сто", "ждун на дванадцяту годину, двісті метрів".
+# Twelve o'clock is the way the speaker faces, which the net does not know, so only the distance is used: a ring.
+CLOCK = rf"\bна\s+\S+\s+(?:{_alt('годині', 'годину', 'години', 'час', 'часа', 'часов')})\b(?:\s+(?:вид|от)\s+мен\w+)?"
+
+
+def _known_callsign(word: str) -> str | None:
+    f = fold(word)
+    if any(same_word(f, fold(n)) and abs(len(f) - len(fold(n))) <= 2 for n in callsign_names()):
+        return callsign(word)
+    return None
+
+
+def _metres(text: str) -> float | None:
+    m = re.search(_DIST, text)
+    return number(m["d1"] or m["d2"]) if m else None
+
+
+def _offset(report: dict, text: str) -> None:
+    """"стою возле Сарая, метрів п'ятдесят на північ": a distance and a direction said after the place refine it."""
+    m = re.search(rf"{_DIST}\s*(?:на\s+|к\s+)?(?P<dir>{_DIR})\b(?!\s+(?:вид|от)\b)", text)
+    rel = relation_of(m["dir"]) if m else None
+    if rel and report.get("relation") in ("near", "at") and not report.get("distance_m"):
+        report["relation"], report["distance_m"] = rel, number(m["d1"] or m["d2"])
+
+
 def stub_extract_uk(text: str) -> dict:
     """Rule-based fallback for Ukrainian/Russian radio reports: the closed demo grammar (header, corrections,
     holding, eight directions, distances, between/near/behind/at, movement). Free speech needs the language model."""
@@ -668,17 +700,49 @@ def stub_extract_uk(text: str) -> dict:
     # before it is the speaker's own position.
     from . import contact_uk
     clauses = [c.strip() for c in re.split(r"\s*[,.;!?]\s*", t) if c.strip()]
+    # Not there, or not first-hand: dropped (unless it is the state of a place: "міст знищено, проїзду нема").
+    clauses = [c for c in clauses if not re.search(rf"\b(?:{NEGATED}|{HEARSAY})\b", c)
+               or (contact_uk.threat(c) or {}).get("what") == "obstacle"]
     seen = next((i for i, c in enumerate(clauses) if contact_uk.starts_contact(c)), None)
     sightings = []
     if seen is not None:
-        sightings.append(contact_uk.report(", ".join(clauses[seen:]), speaker))
-        clauses = clauses[:seen]
+        said = ", ".join(clauses[seen:])
+        s = contact_uk.report(said, speaker)
+        c, located = s["contact"], bool((s.get("anchor") or {}).get("name"))
+        if re.search(CLOCK, said):   # "ждун на дванадцяту годину, двісті метрів": that far from the reporter, way unknown
+            s.update(anchor={"name": speaker or "me", "kind": "unit"}, anchor2=None, relation="from",
+                     distance_m=_metres(re.sub(CLOCK, " ", said)), relative_to_reporter=True, vague=True)
+            located = True
+        if c["what"] == "unknown" and c["side"] == "unknown" and not c["count"] and not located:
+            # "..., наблюдаю": a watching word with nothing named and nowhere said is not a sighting
+            clauses = [x for x in (re.sub(rf"\b{contact_uk.TRIGGER}\b", " ", y).strip() for y in clauses) if x]
+        else:
+            if not located and seen > 0 and any(parse_location(x) for x in clauses[:seen]):
+                # "на Орієнтирі три, міну бачу": no place of its own, so it is where the speaker just said he is
+                s.update(anchor={"name": speaker or "me", "kind": "unit"}, relation="at", relative_to_reporter=True, vague=True)
+            sightings.append(s)
+            clauses = clauses[:seen]
     # "не озеро": what it is not. But "не доходячи до X" (just short of X) is a place.
     t = re.sub(r"\bне\s+(?!доход|доиждж|доезж|дойд)[^,.;]*", " ", ", ".join(clauses))
     intent = bool(re.search(rf"\b{INTENT}\b", t))
-    reports = []
+    reports, subjects = [], set()
     for clause in filter(None, (c.strip() for c in re.split(r"\s*[,.;!?]\s*", t))):
-        r = parse_location(clause)
+        # "Сокіл на Сараї, я на Ромашці": a clause that opens with another callsign is about that unit
+        first, _, rest = clause.partition(" ")
+        subject = _known_callsign(first) if rest else None
+        if subject and subject != speaker and parse_location(rest):
+            clause = rest
+        else:
+            subject = None
+            clause = re.sub(r"^я\s+(?=\S)", "", clause)
+        if subject in subjects:
+            continue
+        cm = re.search(CLOCK + r"\s*(?P<a>[^,.;]*)", clause)
+        if cm and _anchor(cm["a"]):   # "на третій годині від мене Сарай, метрів сто": 100 m from Сарай, way unknown
+            r = {"subject": None, "type": "position", "anchor": _anchor(cm["a"]), "anchor2": None, "relation": "from",
+                 "distance_m": _metres(re.sub(CLOCK, " ", t)), "minutes_ago": None, "confidence": 0.4, "vague": True}
+        else:
+            r = parse_location(clause)
         if r is None and re.search(rf"\b{HOLDING}\b", clause):
             r = {"subject": None, "type": "holding", "anchor": None, "anchor2": None, "relation": "at",
                  "distance_m": None, "minutes_ago": None, "confidence": 0.6}
@@ -688,8 +752,11 @@ def stub_extract_uk(text: str) -> dict:
             r["type"] = "intent"
         elif correction and r["type"] != "holding":
             r["type"] = "correction"
-        reports.append(r)
-        break   # one location per transmission in the demo grammar; the model handles more
+        if r["type"] == "position" and subject is None:
+            _offset(r, t)
+        r["subject"] = subject
+        subjects.add(subject)
+        reports.append(r)   # one location per unit named in the transmission
     reports = sightings + reports
     if not reports:
         reports = [{"subject": None, "type": "other", "anchor": None, "anchor2": None, "relation": "at",

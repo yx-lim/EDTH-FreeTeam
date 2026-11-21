@@ -131,3 +131,7 @@ fpv,en,drone,FPV,90,,check,
 можна їхати,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
 проход открыт,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
 можно ехать,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+міну,uk,ied,mine,21600,,sourced,case form of міна
+мину,ru,ied,mine,21600,,sourced,case form of мина
+мины,ru,ied,mine,21600,,sourced,case form of мина
+розтяжку,uk,ied,tripwire,21600,,sourced,case form of розтяжка
