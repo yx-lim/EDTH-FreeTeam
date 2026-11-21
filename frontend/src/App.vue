@@ -148,6 +148,9 @@ const contactsOnMap = computed(() => {
 const contactDoubt = (e) => !(e.trackConfirmed || e.confirmed || e.corroborated) || e.expired
   || (live.value && now.value - e.t > contactTtl(e.contact) / 2)
 const WARN_M = 300   // backend/contact.py WARN_M
+// backend/contact.py warns(): enemy always; unidentified only when lethal to walk up to (waiting FPV, mine, gun, sniper).
+const WARN_UNKNOWN = ['drone', 'ied', 'artillery', 'sniper']
+const warns = (c) => c?.side === 'hostile' || (c?.side === 'unknown' && WARN_UNKNOWN.includes(c?.what))
 const metres = ([lon1, lat1], [lon2, lat2]) => Math.hypot((lon2 - lon1) * 111320 * Math.cos((lat1 * Math.PI) / 180), (lat2 - lat1) * 110540)
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
 const compass = ([lon1, lat1], [lon2, lat2]) => COMPASS[Math.round(((Math.atan2((lon2 - lon1) * Math.cos((lat1 * Math.PI) / 180), lat2 - lat1)
@@ -155,7 +158,7 @@ const compass = ([lon1, lat1], [lon2, lat2]) => COMPASS[Math.round(((Math.atan2(
 // Enemy contacts on the map within WARN_M of a unit (edge to edge, roughly), nearest first. Recomputed as reports
 // arrive and contacts expire, so a warning clears by itself.
 function threatsTo(u) {
-  return contactsOnMap.value.filter((c) => c.contact?.side === 'hostile')
+  return contactsOnMap.value.filter((c) => warns(c.contact))
     .map((c) => ({ c, d: Math.max(0, metres(u.centre, c.centre) - u.radius_m - c.radius_m) }))
     .filter((x) => x.d <= WARN_M).sort((a, b) => a.d - b.d)
     .map(({ c, d }) => ({ what: describeContact({ ...c.contact, activity: null }), d: Math.round(d / 10) * 10, dir: compass(u.centre, c.centre) }))

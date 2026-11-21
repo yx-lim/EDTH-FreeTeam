@@ -141,6 +141,26 @@ SPEED_MPS = {"infantry": 1.5, "sniper": 1.0, "civilians": 1.5, "tank": 8.0, "apc
              "drone": 15.0, "helicopter": 40.0, "aircraft": 100.0, "artillery": 0.0, "ied": 0.0, "unknown": 3.0}
 SAME_PLACE_M = 75        # two sightings this close (edge to edge, plus movement) can be the same thing
 WARN_M = 300             # a friendly unit this close to a hostile contact is warned
+# Things that hurt whoever walks up to them, whoever owns them: a waiting FPV ("ждун"), a mine, a tripwire, a gun, a
+# sniper. Radio reports rarely say "enemy" for these ("ждун біля Сараю"), so side stays "unknown"; they warn anyway.
+WARN_UNKNOWN = {"drone", "ied", "artillery", "sniper"}
+DRIFT_M = 100            # most that a contact nobody called "moving" is allowed to have shifted between two reports
+MOVED_MAX_M = 600        # and the most for one that is moving: beyond this a second sighting is a second contact
+
+
+def warns(c: dict | None) -> bool:
+    """Should a friendly unit near this contact be warned? Enemy always; unidentified only when the type is lethal."""
+    c = c or {}
+    return c.get("side") == "hostile" or (c.get("side") == "unknown" and c.get("what") in WARN_UNKNOWN)
+
+
+def reach_m(c: dict, dt: float) -> float:
+    """How far this contact may have moved in dt seconds, for deciding whether a new sighting is the same one.
+    Static or firing: nowhere (a ждун waits, a mine stays). Reported moving: its speed, capped. Not said: a little."""
+    if c.get("activity") in ("static", "firing") or not SPEED_MPS.get(c.get("what"), 3.0):
+        return 0.0
+    far = SPEED_MPS.get(c.get("what"), 3.0) * max(0.0, dt)
+    return min(far, MOVED_MAX_M if c.get("activity") == "moving" or c.get("heading") else DRIFT_M)
 
 
 def ttl(c: dict | None) -> float:

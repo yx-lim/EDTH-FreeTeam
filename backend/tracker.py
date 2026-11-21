@@ -114,7 +114,7 @@ class Tracker:
             witnesses = [s for s in event["seen_by"] if s not in ("unidentified", *CONTROL_STATIONS)]
             event["corroborated"] = len(witnesses) >= 2
             self._track(event, geom)
-            event["threats"] = self._threats_from(event["contact"], geom, now) if event["contact"]["side"] == "hostile" else []
+            event["threats"] = self._threats_from(event["contact"], geom, now) if contacts.warns(event["contact"]) else []
         self.events.append(event)
         return event
 
@@ -176,7 +176,8 @@ class Tracker:
         for cs, tr in self._live_tracks(now):
             if not contacts.compatible(tr["contact"], desc):
                 continue
-            moved = contacts.SPEED_MPS.get(tr["contact"]["what"], 3.0) * max(0.0, now - tr["t"])
+            # A new report that says "static" is about something that has not moved either.
+            moved = 0.0 if desc.get("activity") == "static" else contacts.reach_m(tr["contact"], now - tr["t"])
             d = tr["geom"].distance(geom)
             if d <= contacts.SAME_PLACE_M + moved and (best_d is None or d < best_d):
                 best, best_d = cs, d
@@ -196,7 +197,7 @@ class Tracker:
 
     def _threats_near(self, unit: str, unit_geom: BaseGeometry, now: float) -> list[dict]:
         """Live hostile contacts close to a unit's new position, nearest first."""
-        hits = [{**w, "track": cs} for cs, tr in self._live_tracks(now) if tr["contact"]["side"] == "hostile"
+        hits = [{**w, "track": cs} for cs, tr in self._live_tracks(now) if contacts.warns(tr["contact"])
                 and (w := self._warning(unit, unit_geom, tr["contact"], tr["geom"]))]
         return sorted(hits, key=lambda w: w["distance_m"])
 
