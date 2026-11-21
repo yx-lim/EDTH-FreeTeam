@@ -10,9 +10,11 @@
     "test": "node --test tests/*.test.js"
   },
   "dependencies": {
+    "lucide-vue-next": "^1.0.0",
     "maplibre-gl": "^4.7.1",
     "mgrs": "^2.1.0",
     "milsymbol": "^2.2.0",
+    "qrcode": "^1.5.4",
     "vue": "^3.5.12"
   },
   "devDependencies": {

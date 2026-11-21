@@ -3,12 +3,29 @@ from __future__ import annotations
 
 import math
 
-from shapely.geometry import LineString, Point, Polygon
+import mgrs as _mgrs_lib
+from shapely.geometry import LineString, Point, Polygon, mapping
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import nearest_points, substring
 
 from . import grid, lang_uk
-from .geo import Gazetteer, Place, norm
+from .geo import Gazetteer, Place, Proj, norm
+
+_MGRS = _mgrs_lib.MGRS()
+
+
+def _fmt_mgrs(lat: float, lon: float, precision: int = 4) -> str:
+    try:
+        raw = _MGRS.toMGRS(lat, lon, MGRSPrecision=precision)
+        import re
+        m = re.match(r"^(\d{1,2}[C-X])([A-Z]{2})(\d*)$", raw)
+        if not m:
+            return raw
+        d = m.group(3)
+        h = len(d) // 2
+        return " ".join(p for p in (m.group(1), m.group(2), d[:h], d[h:]) if p)
+    except Exception:
+        return ""
 
 WALK_MPS = 1.5          # how far a unit has probably moved since its last report
 MAX_MPS = 4.0           # faster than this (running) means the place was probably misheard
@@ -16,6 +33,55 @@ SLACK_M = 150.0         # tolerance on top of MAX_MPS for vague reports
 NEAR_M = 50.0
 BEARINGS = {"north_of": 0, "east_of": 90, "south_of": 180, "west_of": 270,
             "northeast_of": 45, "southeast_of": 135, "southwest_of": 225, "northwest_of": 315}
+SELF_ANCHORS = {"me", "self", "here", "us", "my position", "current position", "our position", "я", "ми", "мы", "тут", "здесь"}
+_COMPASS8 = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+
+
+def _resolve_self_move(report: dict, gaz: Gazetteer, last: BaseGeometry | None, heading_deg: float | None) -> dict:
+    """Dead-reckoning relative movement ('moving 200m forward-left', '100m north from here')."""
+    origin_xy = last.centroid if last is not None else Point(0, 0)
+    origin_ll = gaz.proj.to_ll(origin_xy)
+    local_proj = Proj(origin_ll.y, origin_ll.x)
+    relation = report.get("relation") or "in_front_of"
+    base_hdg = float(heading_deg or 0.0) % 360
+    if report.get("bearing_deg") is not None:
+        brng = float(report["bearing_deg"]) % 360
+    elif relation in BEARINGS:
+        brng = float(BEARINGS[relation])
+    elif relation == "left_of":
+        brng = (base_hdg - 90) % 360
+    elif relation == "right_of":
+        brng = (base_hdg + 90) % 360
+    elif relation == "behind":
+        brng = (base_hdg + 180) % 360
+    else:
+        brng = base_hdg
+    dist = float(report.get("distance_m") or 100.0)
+    dx = dist * math.sin(math.radians(brng))
+    dy = dist * math.cos(math.radians(brng))
+    dest_local = Point(dx, dy)
+    unc_r = max(25.0, min(85.0, dist * 0.22))
+    region_local = dest_local.buffer(unc_r)
+    region_ll = local_proj.to_ll(region_local)
+    region_gaz_xy = gaz.proj.to_xy(region_ll)
+    c_ll = region_ll.centroid
+    cardinal = _COMPASS8[round(brng / 45) % 8]
+    notes = [f"dead-reckoning {round(dist)}m bearing {round(brng):03d}° ({cardinal})"]
+    ambiguous = last is None or relation in ("left_of", "right_of", "in_front_of", "behind")
+    if last is None:
+        notes.append("no prior fix: projected from AO centre")
+    from shapely.geometry import mapping
+    return {
+        "ok": True,
+        "region": mapping(region_ll),
+        "centre": [round(c_ll.x, 6), round(c_ll.y, 6)],
+        "radius_m": round(math.sqrt(region_local.area / math.pi), 1),
+        "anchor": f"dead-reckoning ({round(dist)}m {cardinal})",
+        "ambiguous": ambiguous,
+        "alternatives": [],
+        "note": "; ".join(notes),
+        "_geom": region_gaz_xy,
+    }
 
 
 def wedge(origin: Point, bearing_deg: float, r_in: float, r_out: float, half_angle: float = 35) -> Polygon:
@@ -86,11 +152,18 @@ def grid_fallback(report: dict, problem: str, gaz: Gazetteer, last, elapsed_s, u
 
 
 def resolve(report: dict, gaz: Gazetteer, last: BaseGeometry | None = None, elapsed_s: float | None = None,
-            units: dict[str, BaseGeometry] | None = None) -> dict:
+            units: dict[str, BaseGeometry] | None = None, heading_deg: float | None = None) -> dict:
     """Returns {ok, region (GeoJSON), centre [lon, lat], radius_m, anchor, ambiguous, alternatives, note}."""
     anchor = report.get("anchor") or {}
     relation = report.get("relation") or "at"
     name = anchor.get("name")
+    # Relative self-movement (e.g. "moving 200m left/forward/north", "Ми йдемо наліво на двісті метрів вперед")
+    if report.get("type") != "contact":
+        if (name and norm(name) in SELF_ANCHORS) or (
+            not name and (report.get("distance_m") or report.get("bearing_deg") is not None)
+            and relation in (*BEARINGS, "bearing", "left_of", "right_of", "in_front_of", "behind", "towards")
+        ):
+            return _resolve_self_move(report, gaz, last, heading_deg)
     if not name:
         return {"ok": False, "note": "no place in report"}
 
@@ -243,10 +316,42 @@ def resolve(report: dict, gaz: Gazetteer, last: BaseGeometry | None = None, elap
         return {"ok": False, "note": "resolved to an empty region"}
     if not gaz.inside(region):
         return {"ok": False, "note": f"{place.name} is outside the mapped area"}
-    return {
+
+    # Build clickable candidate_options when multiple distinct places match (e.g., "the tower", "the church")
+    candidate_options = []
+    if len(distinct) > 1 and relation not in ("intersection", "between"):
+        seen_names: set[str] = set()
+        kept_geoms: list[BaseGeometry] = []
+        ref_pt = last_pt if last_pt is not None else Point(0, 0)
+        for cand in found:
+            if cand.name in seen_names:
+                continue
+            # Avoid duplicate adjacent sub-parts (e.g., Tour Nord + Tour Sud on the same cathedral)
+            if any(cand.geom.distance(g) < 80 for g in kept_geoms):
+                continue
+            seen_names.add(cand.name)
+            kept_geoms.append(cand.geom)
+            c_reg = region if cand is place else cand.geom.buffer(25 if cand.geom.area else 35)
+            c_ll = gaz.lonlat(c_reg)
+            candidate_options.append({
+                "index": len(candidate_options),
+                "name": cand.name,
+                "category": cand.category or cand.kind,
+                "centre": c_ll,
+                "mgrs": _fmt_mgrs(c_ll[1], c_ll[0]),
+                "radius_m": round(math.sqrt(c_reg.area / math.pi), 1),
+                "region": gaz.geojson(c_reg),
+                "distance_m": round(cand.geom.distance(ref_pt)),
+            })
+            if len(candidate_options) >= 4:
+                break
+
+    centre_ll = gaz.lonlat(region)
+    out = {
         "ok": True,
         "region": gaz.geojson(region),
-        "centre": gaz.lonlat(region),
+        "centre": centre_ll,
+        "mgrs": _fmt_mgrs(centre_ll[1], centre_ll[0]),
         "radius_m": round(math.sqrt(region.area / math.pi), 1),
         "anchor": place.name,
         "ambiguous": ambiguous,
@@ -254,3 +359,6 @@ def resolve(report: dict, gaz: Gazetteer, last: BaseGeometry | None = None, elap
         "note": "; ".join(notes),
         "_geom": region,  # internal; stripped before sending to clients
     }
+    if candidate_options:
+        out["candidate_options"] = candidate_options
+    return out

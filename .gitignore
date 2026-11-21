@@ -14,3 +14,4 @@ data/net.jsonl
 frontend/node_modules-icloud-old/
 .venv
 node_modules
+.local_certs/

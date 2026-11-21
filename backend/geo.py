@@ -44,6 +44,7 @@ CATEGORY_WORDS = {
     "hotel": "hotel", "supermarket": "supermarket", "bakery": "bakery", "boulangerie": "bakery",
     "embassy": "embassy", "ambassade": "embassy", "statue": "statue", "monument": "monument", "memorial": "memorial",
     "bookshop": "bookshop", "bookstore": "bookshop", "librairie": "bookshop",
+    "tower": "tower", "towers": "tower", "tour": "tower", "tours": "tower",
 }
 # Small, numerous places (1,400 restaurants, 460 cafes...): matched only by their exact name, never by a fuzzy guess
 # or a shortened phrase, so a misheard landmark is not quietly turned into some bistro.
@@ -53,7 +54,39 @@ MINOR = {"cafe", "restaurant", "bar", "hotel", "bookshop", "statue", "bakery", "
 STOP = {"the", "la", "le", "l", "les", "de", "du", "des", "d", "of", "a", "au", "aux"}
 # Spoken variants folded onto the form OSM uses.
 FOLD = {"st": "saint", "ste": "sainte", "san": "saint", "sant": "saint", "santa": "sainte",
-        "palace": "palais", "street": "rue", "senate": "senat"}
+        "palace": "palais", "chateau": "palais", "street": "rue", "senate": "senat"}
+
+# Bare Ukrainian / Russian generic landmark words (stems) -> canonical English category words.
+_CYRILLIC_CATEGORY_STEMS = (
+    ("церкв", "church"), ("церков", "church"), ("храм", "church"), ("собор", "church"), ("костел", "church"),
+    ("парк", "park"), ("сад", "park"), ("сквер", "park"),
+    ("школ", "school"), ("ліце", "school"), ("лице", "school"),
+    ("лікарн", "hospital"), ("больниц", "hospital"), ("госпітал", "hospital"), ("госпитал", "hospital"),
+    ("станці", "station"), ("станци", "station"), ("метро", "station"), ("вокзал", "station"),
+    ("музе", "museum"), ("площ", "square"), ("майдан", "square"),
+    ("фонтан", "fountain"), ("театр", "theatre"),
+    ("ринок", "market"), ("ринк", "market"), ("рынок", "market"), ("рынк", "market"), ("базар", "market"),
+    ("міст", "bridge"), ("мост", "bridge"), ("мост", "bridge"),
+    ("аптек", "pharmacy"), ("банк", "bank"), ("кафе", "cafe"), ("ресторан", "restaurant"),
+    ("готел", "hotel"), ("отел", "hotel"), ("пошт", "post office"), ("почт", "post office"),
+    ("поліці", "police"), ("полици", "police"),
+    ("башт", "tower"), ("веж", "tower"), ("башн", "tower"),
+)
+_CYRILLIC_PREP = {"около", "біля", "возле", "у", "в", "на", "до", "від", "от", "за", "перед", "під", "под", "над", "при", "к"}
+
+
+def _cyrillic_category(name: str) -> str | None:
+    """Map a bare Cyrillic generic landmark ('церква', 'около церкви', 'парку', 'мосту') to its English category."""
+    toks = [t for t in norm(name).split() if t not in _CYRILLIC_PREP]
+    if len(toks) != 1:
+        return None
+    tok = toks[0]
+    for stem, cat in _CYRILLIC_CATEGORY_STEMS:
+        if tok == stem or (len(stem) >= 4 and tok.startswith(stem) and len(tok) <= len(stem) + 4):
+            return cat
+        if len(stem) == 3 and tok in (stem, stem + "у", stem + "а", stem + "е", stem + "і", stem + "ом", stem + "ів"):
+            return cat
+    return None
 
 
 def norm(text: str) -> str:
@@ -143,8 +176,17 @@ class Gazetteer:
         self.bbox = raw.get("bbox")
         self.proj = Proj(lat0, lon0)
         self.places = [
-            Place(p["name"], p["kind"], p.get("category", ""), self.proj.to_xy(shape(p["geometry"])),
-                  aliases=p.get("aliases", []))
+            Place(
+                p["name"],
+                p["kind"],
+                "tower" if (
+                    p["kind"] == "landmark"
+                    and p.get("category", "") in ("", "landmark")
+                    and norm(p["name"]).startswith(("tour ", "tours "))
+                ) else p.get("category", ""),
+                self.proj.to_xy(shape(p["geometry"])),
+                aliases=p.get("aliases", []),
+            )
             for p in raw["places"]
         ]
         # OSM sometimes spells one street two ways ("Rue de Rennes" / "rue de rennes"): merge them.
@@ -223,11 +265,15 @@ class Gazetteer:
         """Candidates for a spoken anchor, best first. Empty list means unknown: never guess."""
         if lang_uk.has_cyrillic(name):
             # OSM names here are Latin script, so a Cyrillic name must hit the closed set (codenames, aliases,
-            # operator points). No hit means unknown, never a fuzzy guess ("Романа" is not "Ромашка").
+            # operator points) or a bare generic landmark category ("церква", "парк", "міст").
             hit = lang_uk.lookup(name, self._cyrillic_index())
             if hit is None:
-                return []
-            name = hit
+                cat = _cyrillic_category(name)
+                if cat is None:
+                    return []
+                name = cat
+            else:
+                name = hit
         q_norm = " ".join(t for t in norm(name).split() if t not in ("the", "la", "le", "l", "les"))
         if q_norm in self.aliases:
             name = self.aliases[q_norm]
@@ -241,6 +287,9 @@ class Gazetteer:
             best = 9
             for i, pw in enumerate((p.words, *p.alt_words)):   # its name, or another name it is known by
                 if pw == tokens:
+                    if p.minor and wanted != p.category:
+                        best = min(best, 2)
+                        continue
                     if i == 0:
                         return 0
                     best = min(best, 1)   # exact on an alias: behind a place actually called that ("Panthéon")
@@ -293,9 +342,12 @@ class Gazetteer:
             return p.geom.distance(near) if near is not None else 0
 
         # A fuzzy or sound-alike match: the plainest name first, wherever it is ("Odin" -> "Odéon", not a cinema).
-        hits.sort(key=lambda sp: (sp[0], sp[1].minor, len(sp[1].words) if sp[0] >= 4 else 0, round(dist(sp[1]) / 100),
-                                  len(sp[1].words) if sp[0] == 2 else 0, round(dist(sp[1])),
-                                  sp[1].geom.geom_type == "Point", -sp[1].size))
+        if wanted == "tower" and not named:
+            hits.sort(key=lambda sp: (sp[0], sp[1].minor, -sp[1].size, round(dist(sp[1]))))
+        else:
+            hits.sort(key=lambda sp: (sp[0], sp[1].minor, len(sp[1].words) if sp[0] >= 4 else 0, round(dist(sp[1]) / 100),
+                                      len(sp[1].words) if sp[0] == 2 else 0, round(dist(sp[1])),
+                                      sp[1].geom.geom_type == "Point", -sp[1].size))
         return [p for _, p in hits]
 
     def by_sound(self, name: str, place: Place) -> bool:
@@ -384,3 +436,26 @@ class Gazetteer:
     def lonlat(self, geom_xy: BaseGeometry) -> list[float]:
         pt = self.proj.to_ll(geom_xy.centroid)
         return [round(pt.x, 6), round(pt.y, 6)]
+
+    def offline_basemap(self) -> dict:
+        """Cached lightweight GeoJSON of local OSM streets, parks, and major landmark footprints for 100% offline map mode."""
+        if getattr(self, "_offline_map", None) is None:
+            features = []
+            for p in self.places:
+                if p.kind == "street":
+                    geom = p.geom.simplify(4.0)
+                    features.append({
+                        "type": "Feature",
+                        "properties": {"layer": "street", "name": p.name, "major": p.size > 450},
+                        "geometry": mapping(self.proj.to_ll(geom)),
+                    })
+                elif p.kind == "landmark" and not p.minor and p.geom.area >= 300:
+                    geom = p.geom.simplify(3.0)
+                    layer = "park" if p.category == "park" else "building"
+                    features.append({
+                        "type": "Feature",
+                        "properties": {"layer": layer, "name": p.name, "category": p.category},
+                        "geometry": mapping(self.proj.to_ll(geom)),
+                    })
+            self._offline_map = {"type": "FeatureCollection", "features": features}
+        return self._offline_map

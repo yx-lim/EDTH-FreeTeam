@@ -24,6 +24,18 @@ MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
+_offline_mode: bool = False
+
+
+def set_offline(enabled: bool) -> bool:
+    global _offline_mode
+    _offline_mode = bool(enabled)
+    return _offline_mode
+
+
+def is_offline() -> bool:
+    return _offline_mode or (os.getenv("EXTRACTOR") or "").lower() == "rules"
+
 RELATIONS = ["at", "near", "behind", "in_front_of", "north_of", "south_of", "east_of", "west_of",
              "northeast_of", "northwest_of", "southeast_of", "southwest_of",
              "between", "intersection", "towards", "along", "previous",
@@ -54,11 +66,13 @@ Return only a JSON object:
      "bearing_deg": only for relation "bearing": degrees clockwise from north ("bearing 045" -> 45, "1600 mils" ->
                     90, "north-northeast" -> 22.5),
      "minutes_ago": number, only for relation "previous" ("back where I was ten minutes ago"), else null,
+     "quantity": integer count of units/vehicles/personnel if mentioned (e.g. "2 tanks" -> 2, "3 infantry" -> 3, "squad of 6" -> 6), else null,
+     "summary_en": concise English tactical summary (<= 15 words) when the transcript is Ukrainian, Russian, or French, else null,
      "confidence": 0 to 1}} ]}}
 Rules:
 - "X, this is Y": Y is the speaker. Callsigns use digits: "Alpha deux" -> "alpha 2".
 - "correction" / "negative" / "not X, Y": report only the corrected location, with type "correction".
-- "I'll be at X in five minutes": type "intent" (it is not a position).
+- "I'll be at X in five minutes" / "je serai à X" / "ETA": type "intent" (explicit future tense only; present tense like "I am" or "je suis" is ALWAYS "position", never "intent").
 - "holding" / "no change" / "same position": type "holding", anchor null.
 - "I'm with Bravo one" / "50 m north of Bravo one": anchor kind "unit", name "bravo 1".
 - A grid reference ("grid 512 110", "grid three one uniform delta quebec five one two one one zero"): anchor
@@ -98,6 +112,7 @@ Ukrainian and Russian (and mixtures with English, "surzhyk"):
   is infantry, count 3. Put the word as spoken in "contact.word". "ворог"/"противник" = hostile. "ще один"/"ещё один"
   = another one: "contact.another": true. "над X" (above X) -> relation "at" X; "над нами" -> anchor kind "unit", name
   "me". "йде на схід"/"курс захід" is the heading, not the location.
+- Relative dead-reckoning without a named place ("moving 200m north", "we go left 200m forward", "Ми йдемо наліво на двісті метрів вперед", "je vais 100m à droite"): type "movement", anchor {{"name": "me", "kind": "unit"}}, distance_m, and relation ("north_of"/"east_of"/etc. for compass, "in_front_of" for forward/вперед, "left_of" for left/наліво, "right_of" for right/направо, "behind" for back/назад; for front-left use relation "bearing" with bearing_deg 315, front-right bearing_deg 45).
 Never output coordinates. Never invent a place that was not spoken.
 
 Examples:
@@ -106,17 +121,19 @@ Examples:
 "Charlie one and Charlie two at the corner of rue de Tournon and rue de Vaugirard" ->
 {{"speaker":"charlie 1","reports":[{{"subject":"charlie 1","type":"position","anchor":{{"name":"rue de Tournon","kind":"street"}},"anchor2":{{"name":"rue de Vaugirard","kind":"street"}},"relation":"intersection","distance_m":null,"minutes_ago":null,"confidence":0.9}},{{"subject":"charlie 2","type":"position","anchor":{{"name":"rue de Tournon","kind":"street"}},"anchor2":{{"name":"rue de Vaugirard","kind":"street"}},"relation":"intersection","distance_m":null,"minutes_ago":null,"confidence":0.9}}]}}
 "Alpha deux, je me dirige vers le boulevard Saint-Germain" ->
-{{"speaker":"alpha 2","reports":[{{"subject":null,"type":"movement","anchor":{{"name":"boulevard Saint-Germain","kind":"street"}},"anchor2":null,"relation":"towards","distance_m":null,"minutes_ago":null,"confidence":0.9}}]}}
+{{"speaker":"alpha 2","reports":[{{"subject":null,"type":"movement","anchor":{{"name":"boulevard Saint-Germain","kind":"street"}},"anchor2":null,"relation":"towards","distance_m":null,"minutes_ago":null,"summary_en":"Alpha 2 moving towards Boulevard Saint-Germain","confidence":0.9}}]}}
 "Zero, Bravo one, contact, two enemy tanks moving north, three hundred metres east of the church, over" ->
-{{"speaker":"bravo 1","reports":[{{"subject":null,"type":"contact","anchor":{{"name":"church","kind":"landmark"}},"anchor2":null,"relation":"east_of","distance_m":300,"minutes_ago":null,"confidence":0.8,"contact":{{"what":"tank","side":"hostile","count":2,"activity":"moving","heading":"north"}}}}]}}
+{{"speaker":"bravo 1","reports":[{{"subject":null,"type":"contact","anchor":{{"name":"church","kind":"landmark"}},"anchor2":null,"relation":"east_of","distance_m":300,"minutes_ago":null,"quantity":2,"confidence":0.8,"contact":{{"what":"tank","side":"hostile","count":2,"activity":"moving","heading":"north"}}}}]}}
 "Вежа, я Граніт, мінус, мінус, не Сарай. Сто метрів на південь від Ромашки, прийом." ->
-{{"speaker":"граніт","reports":[{{"subject":null,"type":"correction","anchor":{{"name":"Ромашка","kind":"landmark"}},"anchor2":null,"relation":"south_of","distance_m":100,"minutes_ago":null,"confidence":0.9}}]}}
+{{"speaker":"граніт","reports":[{{"subject":null,"type":"correction","anchor":{{"name":"Ромашка","kind":"landmark"}},"anchor2":null,"relation":"south_of","distance_m":100,"minutes_ago":null,"summary_en":"Granit correction: 100m south of Romashka","confidence":0.9}}]}}
 "Вежа, я Лис, ждун біля Сараю, метрів п'ятдесят на захід, не підходити, прийом." ->
-{{"speaker":"лис","reports":[{{"subject":null,"type":"contact","anchor":{{"name":"Сарай","kind":"landmark"}},"anchor2":null,"relation":"west_of","distance_m":50,"vague":true,"minutes_ago":null,"confidence":0.8,"contact":{{"what":"drone","side":"unknown","count":1,"activity":"static","heading":null,"word":"ждун"}}}}]}}"""
+{{"speaker":"лис","reports":[{{"subject":null,"type":"contact","anchor":{{"name":"Сарай","kind":"landmark"}},"anchor2":null,"relation":"west_of","distance_m":50,"vague":true,"minutes_ago":null,"quantity":1,"summary_en":"Lys reports 1 static FPV drone 50m west of Sarai","confidence":0.8,"contact":{{"what":"drone","side":"unknown","count":1,"activity":"static","heading":null,"word":"ждун"}}}}]}}"""
 
 
 def model() -> tuple[str, str, str] | None:
     """(name, label, key) of the language model to use, or None for the rules."""
+    if _offline_mode:
+        return None
     chosen = (os.getenv("EXTRACTOR") or "").lower()
     options = [("gemini", GEMINI_MODEL, os.getenv("GEMINI_API_KEY")), ("mistral", MISTRAL_MODEL, os.getenv("MISTRAL_API_KEY"))]
     for name, label, key in options:
@@ -143,7 +160,9 @@ async def extract(text: str) -> dict:
             out["extractor"] = f"rules ({name} failed: {type(err).__name__})"
     if out is None:
         out = stub_extract(text)
-        out["extractor"] = "rules"
+        out["extractor"] = "rules (offline)" if _offline_mode else "rules"
+        if lang_uk.has_cyrillic(text):
+            _enrich_uk(out, text)
     out["extract_ms"] = round((time.perf_counter() - t0) * 1000)
     return out
 
@@ -162,14 +181,20 @@ async def _mistral(text: str, key: str) -> dict:
 
 
 async def _gemini(text: str, key: str) -> dict:
+    gen_cfg: dict = {"temperature": 0, "responseMimeType": "application/json"}
+    if "3.5" in GEMINI_MODEL or "2.5" in GEMINI_MODEL:
+        gen_cfg["thinkingConfig"] = {"thinkingLevel": "MINIMAL"}
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM}]},
         "contents": [{"role": "user", "parts": [{"text": text}]}],
-        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
+        "generationConfig": gen_cfg,
     }
-    async with httpx.AsyncClient(timeout=8) as client:
+    async with httpx.AsyncClient(timeout=15) as client:
         for attempt in range(2):   # "high demand" spikes are brief: one quick retry, then the rules take over
             r = await client.post(GEMINI_URL.format(model=GEMINI_MODEL), json=payload, headers={"x-goog-api-key": key})
+            if r.status_code == 400 and "thinkingConfig" in payload["generationConfig"]:
+                payload["generationConfig"].pop("thinkingConfig", None)
+                r = await client.post(GEMINI_URL.format(model=GEMINI_MODEL), json=payload, headers={"x-goog-api-key": key})
             if r.status_code not in (429, 500, 503) or attempt:
                 break
             await asyncio.sleep(0.3)
@@ -194,14 +219,26 @@ def _enrich_uk(out: dict, text: str) -> None:
     Adds detail / ttl_s (and hostile for Shahed, Orlan, Lancet...) to Ukrainian/Russian sightings from the model."""
     from . import contact_uk
     for r in out["reports"]:
-        if r["type"] != "contact":
-            continue
-        known = contact_uk.describe(r["contact"].get("word") or text)
-        c = r["contact"]
-        for k in ("detail", "ttl_s", "word"):
-            c[k] = c.get(k) or known.get(k)
-        if known["side"] == "hostile" and c["side"] == "unknown":
-            c["side"] = "hostile"
+        if r["type"] == "contact":
+            known = contact_uk.describe(r["contact"].get("word") or text)
+            c = r["contact"]
+            for k in ("detail", "ttl_s", "word"):
+                c[k] = c.get(k) or known.get(k)
+            if known["side"] == "hostile" and c["side"] == "unknown":
+                c["side"] = "hostile"
+        if not r.get("summary_en"):
+            anchor_name = (r.get("anchor") or {}).get("name") or ""
+            rel = (r.get("relation") or "at").replace("_", " ")
+            dist = f"{round(r['distance_m'])}m " if r.get("distance_m") else ""
+            loc = f"{dist}{rel} {anchor_name}".strip() if anchor_name else ""
+            if r["type"] == "contact" and r.get("contact"):
+                c = r["contact"]
+                qty = f"{c['count']}x " if c.get("count") else ""
+                act = f" ({c['activity']})" if c.get("activity") else ""
+                hdg = f" heading {c['heading']}" if c.get("heading") else ""
+                r["summary_en"] = f"{qty}{c.get('side', 'unknown')} {c.get('what', 'contact')}{act}{hdg} {loc}".strip()
+            elif loc:
+                r["summary_en"] = f"{r['type'].capitalize()} {loc}".strip()
 
 
 def validate(d: dict) -> dict:
@@ -240,9 +277,21 @@ def validate(d: dict) -> dict:
         if r["type"] == "contact":
             r["subject"] = None   # a sighting is never a unit's own position
             r["contact"] = contact.validate(r.get("contact"))
+            if r.get("quantity") and not r["contact"].get("count"):
+                try:
+                    r["contact"]["count"] = max(1, int(r["quantity"]))
+                except (TypeError, ValueError):
+                    pass
+            elif r["contact"].get("count") and not r.get("quantity"):
+                r["quantity"] = r["contact"]["count"]
             if (r.get("anchor") or {}).get("name") and re.fullmatch(contact.SELF, norm(r["anchor"]["name"])):
                 r["anchor"] = {"name": _callsign(d.get("speaker")) or "me", "kind": "unit"}
                 r["relative_to_reporter"] = True
+        elif r.get("quantity") is not None:
+            try:
+                r["quantity"] = max(1, int(r["quantity"]))
+            except (TypeError, ValueError):
+                r["quantity"] = None
         reports.append(r)
     return {"speaker": _callsign(d.get("speaker")), "reports": reports or [_other()]}
 
