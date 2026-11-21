@@ -177,6 +177,17 @@ is silent. The event log (`data/events.jsonl`) is replayed on restart.
 The stress set was used while tuning, so its pass rate is not a held-out accuracy figure. Write fresh
 sentences (ideally with Lysk) and mark their truth points on a map before quoting a number.
 
+Speech-to-text on radio-quality Ukrainian and Russian (macOS voices, then band-passed to 300–3000 Hz, cut to
+8 kHz, noise added, clipped, squelch burst; cached, so re-runs are free):
+
+```bash
+.venv/bin/python -m scripts.stt_bench                       # data/demo_net_uk.jsonl, every provider with a key
+.venv/bin/python -m scripts.stt_bench --providers elevenlabs whisper --conditions clean radio5 --show
+```
+
+It scores word errors, callsign, codenames and numbers per provider and noise level. Gemini calls are spaced 6 s
+apart for the free tier (15 a minute).
+
 ## Built
 
 What this repo can do now, grouped by area. Updated after each major implementation.
@@ -203,6 +214,24 @@ What this repo can do now, grouped by area. Updated after each major implementat
 - One unit whatever the spelling: Граніт (UA) = Гранит (RU).
 - Radio procedure: "Вежа, я Сокіл… прийом", corrections ("мінус", "отставить").
 - A rule-based fallback when no language model is available, and a Ukrainian demo net to replay.
+- **Speech-to-text under radio noise** (`scripts/stt_bench.py`, the 21-line Ukrainian demo net, synthetic voices):
+
+  | provider | audio | word errors | callsign | codenames | numbers | median time |
+  |---|---|---|---|---|---|---|
+  | ElevenLabs | clean | 1% | 19/20 | 12/13 | 8/8 | 0.8 s |
+  | ElevenLabs | radio, 15 dB | 29% | 11/20 | 10/13 | 7/8 | 0.8 s |
+  | ElevenLabs | radio, 5 dB | 79% | 1/20 | 4/13 | 3/8 | 0.9 s |
+  | Gemini | clean | 6% | 18/20 | 13/13 | 8/8 | 4.9 s |
+  | Gemini | radio, 15 dB | 32% | 17/20 | 9/13 | 6/8 | 5.3 s |
+  | Gemini | radio, 5 dB | 64% | 11/20 | 5/13 | 3/8 | 4.3 s |
+  | Whisper (local) | clean | 8% | 20/20 | 9/13 | 6/8 | 2.6 s |
+  | Whisper (local) | radio, 15 dB | 32% | 18/20 | 3/13 | 2/8 | 2.4 s |
+  | Whisper (local) | radio, 5 dB | 62% | 9/20 | 3/13 | 0/8 | 2.5 s |
+
+  ElevenLabs is best on clean audio but breaks first in noise, and slips into English ("north", "zero three").
+  Gemini keeps callsigns and codenames best on a noisy radio but is slowest. All three invent text in heavy noise
+  (Gemini: "непрерывно идет бой"; Whisper: a confident "Вежа, я Сокіл" for a Граніт call), which is why a single
+  report stays dashed until confirmed.
 
 ### 3. Reporting what soldiers see (contacts)
 - "Contact, two enemy tanks, moving north, 300 m east of the church" becomes its own marker; it never moves a friendly unit.
@@ -246,8 +275,9 @@ What this repo can do now, grouped by area. Updated after each major implementat
 
 **Must fix**
 - Team app: old threats never leave its map (it draws from the event list, not the merged sightings).
-- Speech-to-text has not been tested on real radio-quality Ukrainian audio yet. Compare ElevenLabs Scribe, Gemini and
-  gpt-4o-transcribe on degraded recordings and score callsigns, places and numbers. (Skip Voxtral: no Ukrainian.)
+- Speech-to-text is measured only on synthetic Ukrainian voices with simulated radio noise (`scripts/stt_bench.py`):
+  clean speech is fine, but at 5 dB signal-to-noise every provider loses most callsigns. Still not tested on real
+  radio recordings (accents, shouting, wind, overlap): record some with Lysk and run the same scoring.
 
 **Make the map more honest**
 - A misheard place should show two candidate places for the officer to pick (today: the best sound-alike, flagged).
