@@ -14,7 +14,7 @@ import unicodedata
 
 import httpx
 
-from . import contact, lang_uk
+from . import contact, grid, lang_uk
 from .geo import norm
 
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
@@ -32,7 +32,7 @@ Return only a JSON object:
   "reports": [ one object per unit whose location is reported:
     {{"subject": callsign this report is about, or null if it is the speaker,
      "type": one of {TYPES},
-     "anchor": {{"name": place name as spoken (fix obvious transcription slips), "kind": "landmark" | "street" | "intersection" | "unit"}} or null,
+     "anchor": {{"name": place name as spoken (fix obvious transcription slips), "kind": "landmark" | "street" | "intersection" | "unit" | "grid"}} or null,
      "anchor2": same shape, only for "between" and "intersection", else null,
      "relation": one of {RELATIONS},
      "distance_m": metres as a number if a distance is spoken ("two hundred metres" -> 200, "a block" -> 100), else null,
@@ -44,6 +44,10 @@ Rules:
 - "I'll be at X in five minutes": type "intent" (it is not a position).
 - "holding" / "no change" / "same position": type "holding", anchor null.
 - "I'm with Bravo one" / "50 m north of Bravo one": anchor kind "unit", name "bravo 1".
+- A grid reference ("grid 512 110", "grid three one uniform delta quebec five one two one one zero"): anchor
+  {{"name": "<the grid as spoken, digits and letters only, e.g. 512 110 or 31U DQ 512 110>", "kind": "grid"}},
+  relation "at". If a landmark is also given for the same position, add "fallback": {{"anchor": that landmark,
+  "relation": ..., "distance_m": ...}}. Never compute coordinates from a grid yourself.
 - A place mentioned only as context ("can see the church", "not far from the market") is not the anchor.
 - Radio checks, acknowledgements ("roger", "wilco", "say again"): reports = [{{"type": "other", ...}}].
 - Something SEEN (enemy, vehicles, drones, aircraft, artillery, IEDs, civilians): a separate report with type "contact",
@@ -159,6 +163,13 @@ def validate(d: dict) -> dict:
         for k in ("anchor", "anchor2"):
             if not (isinstance(r.get(k), dict) and r[k].get("name")):
                 r[k] = None
+        a = r["anchor"]
+        if a and (a.get("kind") == "grid" or re.match(r"grid\b", norm(a["name"]))):
+            g = grid.grid_name(str(a["name"]))   # "512 110" -> "512110"; full grids -> "31UDQ512110"; junk -> None
+            r["anchor"] = g and {"name": g[0], "kind": "grid", "doubt": a.get("doubt") or g[1]}
+        if "fallback" in r:
+            fb = r["fallback"]
+            r["fallback"] = fb if isinstance(fb, dict) and (fb.get("anchor") or {}).get("name") else None
         for k in ("distance_m", "minutes_ago"):
             try:
                 r[k] = float(r[k]) if r.get(k) is not None else None
@@ -286,6 +297,10 @@ def _parse_clause(clause: str) -> dict | None:
     if m:
         return {**_other(), "type": "position", "relation": "previous", "minutes_ago": _number(m.group("n")),
                 "confidence": 0.6}
+    if g := grid.clause_grid(clause):   # a grid read out beats a landmark; the landmark is kept as the fallback
+        fb = _parse_clause(g[1]) if g[1] else None
+        return {**_other(), "type": "position", "anchor": g[0], "confidence": 0.8,
+                "fallback": fb and {k: fb[k] for k in ("anchor", "anchor2", "relation", "distance_m")}}
     for pattern, relation in _PATTERNS:
         m = re.search(pattern, clause)
         if not m:

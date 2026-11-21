@@ -20,6 +20,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+import warnings
 from dataclasses import dataclass
 
 import mgrs as _mgrs
@@ -274,3 +275,104 @@ def find_spoken_grid(text: str, near: tuple[float, float] | None = None, max_km:
     """Grid reference in a transcript as "31U DQ 5978 0936", or None if there is none or it must not be plotted."""
     hit = parse_spoken_grid(text, near, max_km)
     return hit.grid if hit and not hit.problem else None
+
+
+# ---- grids in reports: short grids, the square on the ground, and a grid inside one clause -------------------------
+
+# Words that announce a grid. After one of them, digits alone are a short grid ("grid 512 110"): the zone and the
+# 100 km square are the ones the area of operations is in, as on any military map sheet.
+GRID_WORDS = {"grid", "gridref", "reference", "ref", "квадрат", "квадраті", "квадрата", "квадрате"}
+_GRID_WORD = re.compile(r"\b(?:grid(?:\s+ref(?:erence)?)?|map\s+ref(?:erence)?|квадрат[іае]?)\b", re.I)
+# "31u dq": lower-case written letters (after lower-casing a transcript) are only read as a grid next to a zone
+_WRITTEN = re.compile(r"\b\d{1,2}\s*[c-hj-np-x]\s*[a-hj-np-z][a-hj-np-v]\b", re.I)
+_NUMBER_WORD = re.compile(r"\b(?:\d+|" + "|".join(sorted({*DIGITS, *TEENS, *TENS}, key=len, reverse=True)) + r")\b")
+_NO_DIGITS = "no digits: only names a 100 km square"
+
+
+def _upper_written(text: str) -> str:
+    return _WRITTEN.sub(lambda m: m.group(0).upper(), text)
+
+
+def short_grid_digits(text: str, keyword: bool = True) -> tuple[str, str | None] | None:
+    """"grid five one two, one one zero" -> ("512110", doubt). With keyword=False the text is the grid itself
+    ("512 110", as a language model hands it over). At least 2+2 digits (a 1 km square)."""
+    syms = _symbols(_upper_written(text))
+    starts = ([i + 1 for i, s in enumerate(syms) if s[0] == "W" and s[1] in GRID_WORDS] if keyword
+              else [next((i for i, s in enumerate(syms) if s[0] == "D"), len(syms))])
+    for j in starts:
+        if j + 1 < len(syms) and syms[j][0] == "D" and syms[j + 1][0] == "L":
+            continue   # zone and square letters follow: a full grid, parse_spoken_grid's job
+        groups: list[list[str]] = []
+        while j < len(syms):
+            if syms[j][0] == "D":
+                groups.append(list(syms[j][2]))
+            elif not (syms[j][0] == "P" and j + 1 < len(syms) and syms[j + 1][0] == "D"):
+                break
+            j += 1
+        digits, doubt = _pick_digits(groups, j < len(syms) and syms[j][0] == "U") if groups else (None, None)
+        if digits and len(digits) >= 4:
+            return digits, doubt
+    return None
+
+
+def complete_grid(grid: str, near: tuple[float, float]) -> str:
+    """A full grid comes back formatted; a short one ("512110") gets the zone and 100 km square that put it nearest
+    to `near` (the square `near` is in, or a neighbour when the area sits on a square's edge).
+    Raises ValueError if it cannot be a grid."""
+    g = compact(grid)
+    if not g.isdigit():
+        return format_grid(g)
+    if not _even(g):
+        raise ValueError(f"not a grid: {grid!r}")
+    best: tuple[float, str] | None = None
+    for dlat in (0.0, -0.6, 0.6):
+        for dlon in (0.0, -0.9, 0.9):
+            prefix = compact(to_mgrs(near[0] + dlat, near[1] + dlon, digits=1))[:-2]   # "31UDQ"
+            try:
+                with warnings.catch_warnings():   # a neighbour's latitude band can warn; that candidate just loses
+                    warnings.simplefilter("ignore")
+                    d = distance_km(near, to_latlon(prefix + g))
+            except Exception:  # noqa: BLE001 - the package raises plain Exception for squares that do not exist
+                continue
+            if best is None or d < best[0]:
+                best = (d, prefix + g)
+    if best is None:
+        raise ValueError(f"no grid square near {near} for {grid!r}")
+    return format_grid(best[1])
+
+
+def square_corners(grid: str) -> list[tuple[float, float]]:
+    """(lat, lon) of the square's south-west, south-east, north-east and north-west corners."""
+    zone, band, col, row, digits = _GRID.fullmatch(compact(format_grid(grid))).groups()
+    size, half = square_m(grid), len(digits) // 2
+    e0, n0 = int(digits[:half] or 0) * size, int(digits[half:] or 0) * size
+    return [to_latlon(f"{zone}{band}{col}{row}{min(e0 + de * size, 99999):05d}{min(n0 + dn * size, 99999):05d}")
+            for de, dn in ((0, 0), (1, 0), (1, 1), (0, 1))]
+
+
+def grid_name(text: str) -> tuple[str, str | None] | None:
+    """A grid as a report's anchor name: the compact full grid ("31UDQ512110") or the digits of a short grid
+    ("512110"), with any doubt about the reading. None if the text holds no usable grid."""
+    hit = parse_spoken_grid(_upper_written(text))
+    if hit and not hit.problem:
+        return compact(hit.grid), hit.ambiguous
+    if hit and hit.problem != _NO_DIGITS:
+        return None
+    return short_grid_digits(text) or (None if _GRID_WORD.search(text) else short_grid_digits(text, keyword=False))
+
+
+def clause_grid(clause: str) -> tuple[dict, str] | None:
+    """A grid in one clause of a report -> (anchor {"name", "kind": "grid", "doubt"}, the words before it).
+    The words before it may name a landmark too ("at the church grid 512 110"): the fallback if the grid is
+    implausible. Short grids need the word "grid" so that "two tanks" or "200 metres" are never read as one."""
+    hit = parse_spoken_grid(_upper_written(clause))
+    if hit and not hit.problem:
+        name, doubt = compact(hit.grid), hit.ambiguous
+    elif hit and hit.problem != _NO_DIGITS:
+        return None
+    elif short := short_grid_digits(clause):
+        name, doubt = short
+    else:
+        return None
+    m = _GRID_WORD.search(clause) or _WRITTEN.search(clause) or _NUMBER_WORD.search(clause)
+    return {"name": name, "kind": "grid", "doubt": doubt}, clause[:m.start()].strip(" ,") if m else ""

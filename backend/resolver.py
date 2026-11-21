@@ -7,7 +7,7 @@ from shapely.geometry import LineString, Point, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import nearest_points, substring
 
-from . import lang_uk
+from . import grid, lang_uk
 from .geo import Gazetteer, Place, norm
 
 WALK_MPS = 1.5          # how far a unit has probably moved since its last report
@@ -46,6 +46,34 @@ def candidates(name: str, gaz: Gazetteer, units: dict[str, BaseGeometry] | None,
     return gaz.find(name, near=near, kind=kind)
 
 
+def grid_place(name: str, gaz: Gazetteer, near: Point | None) -> tuple[list[Place], str | None]:
+    """A grid anchor -> its square as a Place (metres), or a reason not to plot it. A short grid ("512110") takes
+    its zone and 100 km square from `near` (the unit's last position) or else the middle of the mapped area."""
+    ll = gaz.proj.to_ll(near if near is not None else Point(0, 0))   # projection origin = gazetteer centre
+    try:
+        full = grid.complete_grid(name, (ll.y, ll.x))
+        square = gaz.proj.to_xy(Polygon([(lon, lat) for lat, lon in grid.square_corners(full)]))
+    except Exception:  # noqa: BLE001 - ValueError from grid.py, plain Exception from the mgrs package
+        return [], f"grid {name} is not a valid grid reference"
+    label = f"grid {full}"
+    if not gaz.inside(square):
+        return [], f"{label} is outside the mapped area"
+    return [Place(label, "grid", "", square)], None
+
+
+def grid_fallback(report: dict, problem: str, gaz: Gazetteer, last, elapsed_s, units) -> dict:
+    """An implausible grid (misheard, or outside the map): use the landmark said with it, if any, and say why."""
+    fb = report.get("fallback") or {}
+    if not (fb.get("anchor") or {}).get("name"):
+        return {"ok": False, "note": f"{problem}; say again the grid"}
+    out = resolve({**report, "anchor2": None, "distance_m": None, **fb, "fallback": None}, gaz, last, elapsed_s, units)
+    note = f"{problem}; used {fb['anchor']['name']} instead"
+    out["note"] = "; ".join(n for n in (note, out.get("note")) if n)
+    if out.get("ok"):
+        out["ambiguous"] = True
+    return out
+
+
 def resolve(report: dict, gaz: Gazetteer, last: BaseGeometry | None = None, elapsed_s: float | None = None,
             units: dict[str, BaseGeometry] | None = None) -> dict:
     """Returns {ok, region (GeoJSON), centre [lon, lat], radius_m, anchor, ambiguous, alternatives, note}."""
@@ -56,10 +84,17 @@ def resolve(report: dict, gaz: Gazetteer, last: BaseGeometry | None = None, elap
         return {"ok": False, "note": "no place in report"}
 
     last_pt = last.centroid if last is not None else None
-    found = candidates(name, gaz, units, last_pt, anchor.get("kind"))
+    notes = []
+    if anchor.get("kind") == "grid":
+        found, problem = grid_place(name, gaz, last_pt)
+        if problem:
+            return grid_fallback(report, problem, gaz, last, elapsed_s, units)
+        if anchor.get("doubt"):
+            notes.append(f"read back the grid: {anchor['doubt']}")
+    else:
+        found = candidates(name, gaz, units, last_pt, anchor.get("kind"))
     if not found:
         return {"ok": False, "note": f"unknown place: {name!r}; say again or name a nearby street"}  # never guess
-    notes = []
     # Physics check: a unit on foot cannot cross the district in a minute. Prefer a reachable candidate; if none
     # is reachable, plot the best one but flag it, because the place was probably misheard.
     # (Not for movement: "towards X" names a destination, not where the unit is.)
@@ -74,7 +109,7 @@ def resolve(report: dict, gaz: Gazetteer, last: BaseGeometry | None = None, elap
             notes.append(f"implausible move: {jump:.0f} m in {elapsed_s:.0f} s; check the place name")
     place: Place = found[0]
     distinct = list(dict.fromkeys(p.name for p in found))
-    ambiguous = len(distinct) > 1 or any("implausible" in n for n in notes)
+    ambiguous = len(distinct) > 1 or any("implausible" in n or "read back" in n for n in notes)
     centre_geom = place.geom.centroid
     dist = report.get("distance_m")
     base = footprint_radius(place)
@@ -134,6 +169,8 @@ def resolve(report: dict, gaz: Gazetteer, last: BaseGeometry | None = None, elap
             notes.append(f"moving towards {place.name}: up to {round(cap)} m along the streets")
     elif relation == "near":
         region = place.geom.buffer(dist or NEAR_M)
+    elif place.kind == "grid":   # "at" a grid: the square the grid names, no more and no less
+        region = place.geom
     else:  # "at": within a short walk of the walls (a door, the steps, the pavement outside)
         region = place.geom.buffer({"unit": 15, "street": 12}.get(place.kind, 20 if place.geom.area else 25))
         if place.kind == "street" and last_pt is not None:
