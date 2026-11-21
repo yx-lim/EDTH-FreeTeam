@@ -318,7 +318,8 @@ _CS = (r"(?:(?:alpha|bravo|charlie|delta|echo|foxtrot|kilo|sierra|tango|zulu|zer
        r"|(?:golf|hotel|india|juliet|lima|mike|november|oscar|papa|quebec|romeo|uniform|victor|whiskey|xray|yankee)"
        rf"\s+{_NUMBER}\b)")
 _NUMWORDS = {"zero": 0, "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
-             "seven": 7, "eight": 8, "nine": 9, "ten": 10, "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40,
+             "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+             "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40,
              "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90, "un": 1, "une": 1, "deux": 2,
              "trois": 3, "quatre": 4, "cinq": 5, "dix": 10, "vingt": 20, "trente": 30, "quarante": 40,
              "cinquante": 50}
@@ -442,8 +443,11 @@ def _distances(clause: str) -> tuple[str, dict]:
     info: dict = {}
     c = clause
     # Bearings read digit by digit: "bearing zero four five" -> "bearing 045"
-    c = re.sub(r"\b(bearing|azimuth|azimut|cap)\s+((?:(?:zero|oh|one|two|three|four|five|six|seven|eight|niner|nine)\b\s*){2,4})",
-               lambda m: f"{m.group(1)} " + "".join(_DIGIT_WORDS[w] for w in m.group(2).split()), c)
+    c = re.sub(r"\b(bearing|azimuth|azimut|cap)\s+((?:(?:zero|oh|one|two|three|four|five|six|seven|eight|niner|nine)\b(?!\s+(?:hundred|thousand))\s*){2,4})",
+               lambda m: f"{m.group(1)} " + "".join(_DIGIT_WORDS[w] for w in m.group(2).split()) + " ", c)
+    # "sixteen hundred mils", "forty five degrees": an angle said in words
+    c = re.sub(rf"\b(?P<n>{_NUM})\s*(?P<u>mils?|degrees?)\b",
+               lambda m: f"{int(v)} {m['u']}" if (v := _number(m["n"])) is not None else m[0], c)
     fixed = [(r"\bhalf (?:a |an )?(?:kilomet(?:re|er)|km|klick|click)\b", "500 m", False),
              (r"\b(?:a )?(?:couple|coupla)(?: of)? hundred(?: (?:metres?|meters?|m))?\b", "200 m", True),
              (r"\b(?:a )?few hundred(?: (?:metres?|meters?|m))?\b", "300 m", True),

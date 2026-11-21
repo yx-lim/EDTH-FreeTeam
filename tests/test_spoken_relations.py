@@ -112,6 +112,8 @@ def test_vague_distance_widens_the_region():
     ("on bearing zero niner zero from the Pantheon", 90),
     ("500 m on azimuth 1600 mils from the Pantheon", 90),
     ("north northeast of the Pantheon", 22.5),
+    ("bearing zero four five, three hundred metres from Saint-Sulpice church", 45),   # "three" is the distance
+    ("on azimuth sixteen hundred mils, two hundred metres from the Pantheon", 90),     # an angle in words
 ])
 def test_bearings(phrase, deg):
     _, r = first(f"this is Echo 1, {phrase}")
