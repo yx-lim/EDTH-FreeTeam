@@ -181,6 +181,18 @@ async def add_place(body: NewPlace) -> dict:
     return {"places": gaz.custom()}
 
 
+@app.post("/events/{event_id}/confirm")
+async def confirm(event_id: int) -> dict:
+    """The duty officer accepts a report. Until then it is a draft: the map draws its unit with a dashed
+    ("suspected") frame when the fix is ambiguous or the callsign was assumed."""
+    fields = {"confirmed": True, "confirmed_at": time.time()}
+    event = tracker.annotate(event_id, **fields)
+    if event is None:
+        raise HTTPException(404, f"no event {event_id}")
+    await broadcast({"type": "annotate", "id": event_id, "fields": fields})
+    return tracker.public(event)
+
+
 @app.get("/export.geojson")
 def export() -> dict:
     """Current picture and track history as GeoJSON, for any GIS or C2 tool."""

@@ -1,11 +1,29 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import maplibregl from 'maplibre-gl'
+import ms from 'milsymbol'
 import { createVad } from './vad.js'
+import { gridLines, mgrsAt } from './grid.js'
 
-const COLOURS = ['#2563eb', '#dc2626', '#059669', '#d97706', '#7c3aed', '#0891b2']
+// Own units only, so cool colours: on a NATO map red means hostile and yellow means unknown.
+const COLOURS = ['#60a5fa', '#22d3ee', '#a78bfa', '#34d399', '#93c5fd', '#c084fc']
 const WALK_MPS = 1.5          // uncertainty grows at walking pace while a unit is silent
 const STALE_CAP_M = 1500
+const STALE_S = 300           // silent this long: the unit's frame turns dashed ("suspected" in APP-6)
+// APP-6 / MIL-STD-2525C friendly infantry: P = present (solid frame), A = anticipated/suspected (dashed frame).
+const SIDC = { solid: 'SFGPUCI--------', dashed: 'SFGAUCI--------' }
+const BASEMAPS = {
+  // OpenStreetMap with its brightness inverted and colour drained in the raster paint (no API key, unlike CARTO's dark).
+  dark: { label: 'Dark', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], attribution: '© OpenStreetMap contributors',
+    maxzoom: 19, grid: '#cbd5e1', halo: '#0b0d10',
+    paint: { 'raster-brightness-min': 0.92, 'raster-brightness-max': 0.06, 'raster-saturation': -0.85, 'raster-hue-rotate': 180,
+      'raster-contrast': 0.1 } },
+  satellite: { label: 'Satellite', tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+    attribution: 'Imagery © Esri, Maxar, Earthstar Geographics', maxzoom: 19, grid: '#ffffff', halo: '#000000',
+    paint: { 'raster-brightness-max': 0.8 } },
+  topo: { label: 'Topo', tiles: ['a', 'b', 'c'].map((s) => `https://${s}.tile.opentopomap.org/{z}/{x}/{y}.png`),
+    attribution: 'Map data © OpenStreetMap contributors, SRTM · Style © OpenTopoMap (CC-BY-SA)', maxzoom: 17, grid: '#1f2937', halo: '#ffffff' },
+}
 
 const events = ref([])
 const customPlaces = ref([])
@@ -19,6 +37,15 @@ const status = ref('connecting…')
 const serverStt = ref(null)    // provider name when the backend can transcribe, else null
 const heard = ref('')
 const now = ref(Date.now() / 1000)
+// Map look is a per-screen preference, remembered in this browser only (storage can be blocked: then defaults).
+const saved = (() => { try { return JSON.parse(localStorage.getItem('mapLook')) || {} } catch { return {} } })()
+const basemap = ref(saved.basemap in BASEMAPS ? saved.basemap : 'dark')
+const showGrid = ref(saved.showGrid ?? true)
+const night = ref(!!saved.night)  // red-on-black, keeps night vision at a dark command post
+watch([basemap, showGrid, night], () => {
+  try { localStorage.setItem('mapLook', JSON.stringify({ basemap: basemap.value, showGrid: showGrid.value, night: night.value })) } catch {}
+})
+const cursorGrid = ref('')     // MGRS under the mouse (or of the map centre on touch screens)
 let map, recogniser, recorder, stream, chunks, ticker
 
 // Radio-net mode: listen to the whole channel, no button, no callsign picker.
@@ -63,12 +90,24 @@ function circle([lon, lat], r, n = 48) {
   })] }
 }
 
+// A report is a draft until the duty officer confirms it, and only drafts with real doubt look uncertain:
+// an ambiguous fix or an assumed callsign. Any unit silent for STALE_S is uncertain again, confirmed or not.
+const suspected = (e) => ((e.ambiguous || e.callsign_assumed) && !e.confirmed) || (live.value && now.value - e.t > STALE_S)
+
+async function confirm(e) {
+  await fetch(`/api/events/${e.id}/confirm`, { method: 'POST' })   // the update comes back over the WebSocket
+}
+
 function render() {
   if (!map?.getSource('regions')) return
   const ok = visible.value.filter((e) => e.ok && !e.superseded)
   const latest = new Map()
   ok.forEach((e) => latest.set(e.callsign, e))
   const current = [...latest.values()]
+  map.getSource('units').setData({ type: 'FeatureCollection', features: current.map((e) => ({
+    type: 'Feature', geometry: { type: 'Point', coordinates: e.centre },
+    properties: { icon: `ms:${suspected(e) ? SIDC.dashed : SIDC.solid}` },
+  })) })
   map.getSource('regions').setData({ type: 'FeatureCollection', features: ok.map((e) => ({
     type: 'Feature', geometry: e.region,
     properties: { colour: colour(e.callsign), current: latest.get(e.callsign) === e, ambiguous: !!e.ambiguous },
@@ -84,7 +123,9 @@ function render() {
   })) : [] })
   map.getSource('labels').setData({ type: 'FeatureCollection', features: current.map((e) => ({
     type: 'Feature', geometry: { type: 'Point', coordinates: e.centre },
-    properties: { label: `${e.callsign} ±${Math.round(e.radius_m)} m${live.value ? ' · ' + ago(e.t) : ''}`, colour: colour(e.callsign) },
+    // Second line: the grid, never more precise than the report (±40 m reads as a 100 m square).
+    properties: { label: `${e.callsign} ±${Math.round(e.radius_m)} m${live.value ? ' · ' + ago(e.t) : ''}\n${mgrsAt(e.centre, { radius: e.radius_m })}`,
+      colour: colour(e.callsign) },
   })) })
   map.getSource('tasks').setData({ type: 'FeatureCollection', features: tasks.value.map((e) => ({
     type: 'Feature', geometry: e.target.region,
@@ -95,6 +136,33 @@ function render() {
   })) })
 }
 watch([visible, callsigns, customPlaces, now, tasks], render)
+
+// --- map look: basemap, MGRS grid, night mode -----------------------------------------------------------------
+function updateGrid() {
+  if (!map?.getSource('grid')) return
+  const g = showGrid.value ? gridLines(map.getBounds(), map.getZoom()) : null
+  map.getSource('grid').setData(g?.lines ?? { type: 'FeatureCollection', features: [] })
+  map.getSource('grid-labels').setData(g?.labels ?? { type: 'FeatureCollection', features: [] })
+}
+
+function applyBasemap() {
+  if (!map?.getLayer('grid-line')) return
+  const b = BASEMAPS[basemap.value]
+  for (const id of Object.keys(BASEMAPS)) map.setLayoutProperty(`base-${id}`, 'visibility', id === basemap.value ? 'visible' : 'none')
+  map.setPaintProperty('grid-line', 'line-color', b.grid)
+  map.setPaintProperty('grid-label', 'text-color', b.grid)
+  map.setPaintProperty('grid-label', 'text-halo-color', b.halo)   // unit labels keep their dark halo on every basemap
+}
+watch(basemap, applyBasemap)
+watch(showGrid, updateGrid)
+
+// Milsymbol draws each APP-6 symbol the first time the map asks for it.
+function addSymbolImage(ev) {
+  if (!ev.id.startsWith('ms:') || map.hasImage(ev.id)) return
+  const ratio = window.devicePixelRatio || 1
+  const canvas = new ms.Symbol(ev.id.slice(3), { size: 26 }).asCanvas(ratio)
+  map.addImage(ev.id, canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height), { pixelRatio: ratio })
+}
 
 function add(event) {
   const atEnd = cursor.value === events.value.length
@@ -351,14 +419,26 @@ onMounted(async () => {
     style: {
       version: 8,
       glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
-      sources: { osm: { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256,
-        attribution: '© OpenStreetMap contributors' } },
-      layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
+      // All basemaps are loaded once and switched by visibility, so our own layers and symbols are never rebuilt.
+      sources: Object.fromEntries(Object.entries(BASEMAPS).map(([id, b]) => [`base-${id}`,
+        { type: 'raster', tiles: b.tiles, tileSize: 256, maxzoom: b.maxzoom, attribution: b.attribution }])),
+      layers: Object.keys(BASEMAPS).map((id) => ({ id: `base-${id}`, type: 'raster', source: `base-${id}`,
+        layout: { visibility: id === basemap.value ? 'visible' : 'none' }, paint: BASEMAPS[id].paint ?? {} })),
     },
   })
+  map.on('styleimagemissing', addSymbolImage)
   map.on('load', () => {
     const empty = { type: 'FeatureCollection', features: [] }
-    for (const id of ['regions', 'paths', 'labels', 'stale', 'custom', 'tasks']) map.addSource(id, { type: 'geojson', data: empty })
+    for (const id of ['regions', 'paths', 'labels', 'stale', 'custom', 'tasks', 'units', 'grid', 'grid-labels']) {
+      map.addSource(id, { type: 'geojson', data: empty })
+    }
+    // MGRS kilometre grid under everything we draw, with 2-digit easting/northing labels at the edges.
+    map.addLayer({ id: 'grid-line', type: 'line', source: 'grid',
+      paint: { 'line-color': '#cbd5e1', 'line-width': ['case', ['get', 'major'], 1.5, 0.9],
+        'line-opacity': ['case', ['get', 'major'], 0.9, 0.6] } })
+    map.addLayer({ id: 'grid-label', type: 'symbol', source: 'grid-labels',
+      layout: { 'text-field': ['get', 'label'], 'text-size': 11, 'text-font': ['Open Sans Semibold'], 'text-allow-overlap': true },
+      paint: { 'text-color': '#94a3b8', 'text-halo-color': '#0b0d10', 'text-halo-width': 1.5 } })
     map.addLayer({ id: 'stale-line', type: 'line', source: 'stale',
       paint: { 'line-color': ['get', 'colour'], 'line-width': 1, 'line-dasharray': [1, 3], 'line-opacity': 0.8 } })
     map.addLayer({ id: 'region-fill', type: 'fill', source: 'regions',
@@ -375,19 +455,30 @@ onMounted(async () => {
       paint: { 'line-color': ['get', 'colour'], 'line-width': 2.5, 'line-dasharray': [1, 1.5] } })
     map.addLayer({ id: 'task-label', type: 'symbol', source: 'tasks',
       layout: { 'text-field': ['get', 'label'], 'text-size': 12, 'text-font': ['Open Sans Semibold'], 'text-max-width': 30 },
-      paint: { 'text-color': ['get', 'colour'], 'text-halo-color': '#fff', 'text-halo-width': 2 } })
+      paint: { 'text-color': ['get', 'colour'], 'text-halo-color': '#0b0d10', 'text-halo-width': 2 } })
     map.addLayer({ id: 'path', type: 'line', source: 'paths',
       paint: { 'line-color': ['get', 'colour'], 'line-width': 2, 'line-opacity': 0.7 } })
     map.addLayer({ id: 'custom-dot', type: 'circle', source: 'custom',
-      paint: { 'circle-radius': 5, 'circle-color': '#111827', 'circle-stroke-color': '#fff', 'circle-stroke-width': 2 } })
+      paint: { 'circle-radius': 5, 'circle-color': '#f5c518', 'circle-stroke-color': '#0b0d10', 'circle-stroke-width': 2 } })
     map.addLayer({ id: 'custom-label', type: 'symbol', source: 'custom',
       layout: { 'text-field': ['get', 'label'], 'text-size': 12, 'text-offset': [0, 1.2], 'text-font': ['Open Sans Semibold'] },
-      paint: { 'text-color': '#111827', 'text-halo-color': '#fff', 'text-halo-width': 2 } })
+      paint: { 'text-color': '#f5c518', 'text-halo-color': '#0b0d10', 'text-halo-width': 2 } })
+    // Each unit's current fix as an APP-6 friendly infantry symbol: solid frame, or dashed while in doubt.
+    map.addLayer({ id: 'unit-icon', type: 'symbol', source: 'units',
+      layout: { 'icon-image': ['get', 'icon'], 'icon-allow-overlap': true, 'icon-ignore-placement': true } })
     map.addLayer({ id: 'label', type: 'symbol', source: 'labels',
-      layout: { 'text-field': ['get', 'label'], 'text-size': 13, 'text-offset': [0, -1.2], 'text-max-width': 30, 'text-font': ['Open Sans Semibold'] },
-      paint: { 'text-color': ['get', 'colour'], 'text-halo-color': '#fff', 'text-halo-width': 2 } })
+      layout: { 'text-field': ['get', 'label'], 'text-size': 12, 'text-offset': [0, -2.6], 'text-max-width': 30,
+        'text-font': ['Open Sans Semibold'], 'text-line-height': 1.25 },
+      paint: { 'text-color': ['get', 'colour'], 'text-halo-color': '#0b0d10', 'text-halo-width': 2 } })
+    applyBasemap()
+    updateGrid()
     render()
   })
+  map.on('moveend', updateGrid)
+  // Live grid readout: under the mouse on a desktop, the map centre on a touch screen.
+  map.on('mousemove', (ev) => { cursorGrid.value = mgrsAt([ev.lngLat.lng, ev.lngLat.lat]) })
+  map.on('move', () => { if (!matchMedia('(hover: hover)').matches) cursorGrid.value = mgrsAt(map.getCenter().toArray()) })
+  cursorGrid.value = mgrsAt(map.getCenter().toArray())
   // Right-click (long-press on touch) names a point, e.g. "checkpoint 3"; it can be spoken at once.
   map.on('contextmenu', async (ev) => {
     const name = window.prompt('Name this point (e.g. "checkpoint 3")')
@@ -411,8 +502,23 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="layout">
-    <div id="map"></div>
+  <div class="layout" :class="{ night }">
+    <div class="mapwrap">
+      <div id="map"></div>
+      <div class="mapbar">
+        <div class="seg" role="group" aria-label="Basemap">
+          <button v-for="(b, id) in BASEMAPS" :key="id" type="button" :class="{ sel: basemap === id }"
+            :aria-pressed="basemap === id" @click="basemap = id">{{ b.label }}</button>
+        </div>
+        <button type="button" class="chipbtn" :class="{ sel: showGrid }" :aria-pressed="showGrid" @click="showGrid = !showGrid">MGRS grid</button>
+        <button type="button" class="chipbtn" :class="{ sel: night }" :aria-pressed="night" @click="night = !night">Night</button>
+      </div>
+      <div class="readout" title="MGRS under the cursor (1 m)">{{ cursorGrid }}</div>
+      <div class="legend">
+        <span><i class="frame"></i> report</span>
+        <span><i class="frame dashed"></i> in doubt: ambiguous, callsign assumed, or silent 5 min</span>
+      </div>
+    </div>
     <aside>
       <header>
         <h1>Voice-to-Map</h1>
@@ -490,7 +596,11 @@ onUnmounted(() => {
           <template v-for="id in tx.events" :key="id">
             <div v-if="byId.get(id)" class="read" :class="{ gone: byId.get(id).superseded }">
               <template v-if="byId.get(id).ok">→ <b :style="{ color: colour(byId.get(id).callsign) }">{{ byId.get(id).callsign }}</b>
-                {{ (byId.get(id).parsed?.relation || '').replaceAll('_', ' ') }} {{ byId.get(id).anchor }} · ±{{ byId.get(id).radius_m }} m</template>
+                {{ (byId.get(id).parsed?.relation || '').replaceAll('_', ' ') }} {{ byId.get(id).anchor }} · ±{{ byId.get(id).radius_m }} m
+                <span class="gridref">{{ mgrsAt(byId.get(id).centre, { radius: byId.get(id).radius_m }) }}</span>
+                <button v-if="!byId.get(id).confirmed && !byId.get(id).superseded" type="button" class="confirm small"
+                  @click="confirm(byId.get(id))">Confirm</button>
+                <span v-else-if="byId.get(id).confirmed" class="tick">✓ confirmed</span></template>
               <template v-else-if="byId.get(id).type === 'order'">▸ <b :style="{ color: colour(byId.get(id).callsign) }">{{ byId.get(id).callsign }}</b> {{ byId.get(id).note }}</template>
               <template v-else>{{ byId.get(id).callsign }}: {{ byId.get(id).note }}</template>
               <span v-if="byId.get(id).acked_by" class="tick" :title="'acknowledged by ' + byId.get(id).acked_by">✓ {{ byId.get(id).acked_by }}</span>
@@ -518,10 +628,15 @@ onUnmounted(() => {
             <span v-if="e.reached" class="tick">✓ arrived</span>
           </div>
           <div class="said">“{{ e.text }}”</div>
-          <div v-if="e.ok" class="read">→ {{ (e.parsed?.relation || '').replaceAll('_', ' ') }} <b>{{ e.anchor }}</b> · ±{{ e.radius_m }} m</div>
+          <div v-if="e.ok" class="read">→ {{ (e.parsed?.relation || '').replaceAll('_', ' ') }} <b>{{ e.anchor }}</b> · ±{{ e.radius_m }} m
+            <span class="gridref">{{ mgrsAt(e.centre, { radius: e.radius_m }) }}</span></div>
           <div v-if="e.superseded" class="note">corrected by a later report</div>
           <div v-if="e.note" class="note">{{ e.note }}</div>
           <div v-if="e.alternatives?.length" class="note">Could also be: {{ e.alternatives.join(', ') }}</div>
+          <div v-if="e.ok && !e.superseded" class="actions">
+            <button v-if="!e.confirmed" type="button" class="confirm" @click="confirm(e)">Confirm</button>
+            <span v-else class="tick">✓ confirmed {{ clock(e.confirmed_at) }}</span>
+          </div>
         </li>
       </ol>
     </aside>
@@ -529,61 +644,93 @@ onUnmounted(() => {
 </template>
 
 <style>
-body { margin: 0; font: 14px/1.4 system-ui, sans-serif; color: #111827; }
+/* Command-post theme: near-black, low glare, one yellow colour for the action that matters (Confirm, Send). */
+:root { --bg: #0b0d10; --panel: #111418; --card: #161a20; --line: #262b33; --text: #e6e8eb; --muted: #8a93a0;
+  --accent: #f5c518; --ok: #34d399; --warn: #f59e0b; --bad: #f87171; --blue: #60a5fa; }
+body { margin: 0; font: 14px/1.4 system-ui, sans-serif; color: var(--text); background: var(--bg); }
 .layout { display: grid; grid-template-columns: 1fr 380px; height: 100vh; }
-#map { height: 100%; }
-aside { display: flex; flex-direction: column; gap: 12px; padding: 14px; overflow: hidden; border-left: 1px solid #e5e7eb; background: #fff; }
+/* Night: everything red on black, so the operator's eyes stay adapted to the dark. */
+.layout.night { filter: grayscale(1) sepia(1) saturate(14) hue-rotate(-52deg) brightness(0.5) contrast(1.25); }
+.mapwrap { position: relative; min-height: 0; }
+#map { height: 100%; background: var(--bg); }
+.mapbar { position: absolute; top: 10px; left: 10px; display: flex; gap: 6px; flex-wrap: wrap; z-index: 2; }
+.seg { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: rgba(17, 20, 24, 0.92); }
+.seg button, .chipbtn { background: rgba(17, 20, 24, 0.92); color: var(--muted); border: 0; border-radius: 0; padding: 5px 10px; font-size: 12px; }
+.chipbtn { border: 1px solid var(--line); border-radius: 6px; }
+.seg button.sel, .chipbtn.sel { color: var(--text); background: #232933; box-shadow: inset 0 -2px 0 var(--accent); }
+.readout { position: absolute; left: 10px; bottom: 10px; z-index: 2; font: 600 13px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text); background: rgba(11, 13, 16, 0.88); border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; letter-spacing: 0.04em; }
+.legend { position: absolute; right: 10px; top: 10px; z-index: 2; display: grid; gap: 4px; font-size: 11px; color: var(--muted);
+  background: rgba(11, 13, 16, 0.88); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; max-width: 230px; }
+.legend span { display: flex; gap: 6px; align-items: center; }
+.legend .frame { width: 16px; height: 11px; flex: none; background: #80e0ff; border: 1.5px solid #000; box-sizing: border-box; }
+.legend .frame.dashed { border: 1.5px dashed #000; outline: 1px solid #80e0ff; background: transparent; }
+.maplibregl-ctrl-attrib { background: rgba(11, 13, 16, 0.7) !important; color: var(--muted); }
+.maplibregl-ctrl-attrib a { color: var(--muted) !important; }
+aside { display: flex; flex-direction: column; gap: 12px; padding: 14px; overflow: hidden; border-left: 1px solid var(--line); background: var(--panel); }
 header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-h1 { font-size: 18px; margin: 0; }
-.status { color: #6b7280; font-size: 12px; text-align: right; }
+h1 { font-size: 15px; margin: 0; letter-spacing: 0.08em; text-transform: uppercase; }
+.status { color: var(--muted); font-size: 12px; text-align: right; }
 form { display: grid; gap: 8px; }
-textarea, input.callsign, select { font: inherit; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 6px; }
+textarea, input.callsign, select, input.wide { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--text); }
 textarea { resize: vertical; }
 input.callsign { width: 110px; margin-left: 6px; }
+input.wide { width: 100%; box-sizing: border-box; }
 .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.row.small { font-size: 12px; color: #6b7280; gap: 12px; }
+.row.small { font-size: 12px; color: var(--muted); gap: 12px; }
+.row.small a { color: var(--blue); }
 .hint { margin-left: auto; }
-button { font: inherit; padding: 6px 10px; border: 1px solid #1d4ed8; background: #2563eb; color: #fff; border-radius: 6px; cursor: pointer; user-select: none; }
-button.on { background: #dc2626; border-color: #b91c1c; }
-button.quiet { background: #fff; color: #374151; border-color: #d1d5db; margin-left: auto; }
-button:disabled { opacity: 0.5; cursor: not-allowed; }
-.tabs { display: flex; border: 1px solid #d1d5db; border-radius: 8px; overflow: hidden; }
-.tabs button { flex: 1; background: #fff; color: #374151; border: 0; border-radius: 0; }
-.tabs button.sel { background: #111827; color: #fff; }
+button { font: inherit; padding: 6px 10px; border: 1px solid #2d333c; background: #1c2128; color: var(--text); border-radius: 6px; cursor: pointer; user-select: none; }
+button:hover { border-color: #3a414c; }
+button[type='submit'], button.confirm { background: var(--accent); border-color: var(--accent); color: #111; font-weight: 600; }
+button.confirm { padding: 3px 12px; font-size: 12px; }
+button.confirm.small { padding: 1px 8px; margin-left: 6px; }
+button.on { background: #b91c1c; border-color: #dc2626; color: #fff; }
+button.quiet { background: transparent; color: var(--muted); border-color: var(--line); margin-left: auto; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+.tabs { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.tabs button { flex: 1; background: transparent; color: var(--muted); border: 0; border-radius: 0; }
+.tabs button.sel { background: #232933; color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
 .net { display: grid; gap: 8px; }
-.filebtn { font: inherit; padding: 6px 10px; border: 1px solid #1d4ed8; color: #1d4ed8; border-radius: 6px; cursor: pointer; }
-.filebtn.on { background: #dc2626; border-color: #b91c1c; color: #fff; }
+.filebtn { font: inherit; padding: 6px 10px; border: 1px solid #2d333c; background: #1c2128; color: var(--text); border-radius: 6px; cursor: pointer; }
+.filebtn.on { background: #b91c1c; border-color: #dc2626; color: #fff; }
 .filebtn input { display: none; }
-input.wide { font: inherit; width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 6px; }
-.meter { height: 6px; background: #f3f4f6; border-radius: 3px; overflow: hidden; }
-.meter div { height: 100%; background: #9ca3af; transition: width 80ms linear; }
-.meter div.hot { background: #dc2626; }
-.chip { background: #f3f4f6; color: #374151; border-radius: 4px; padding: 0 6px; }
-.k-report .chip { background: #dcfce7; color: #166534; }
-.k-order .chip { background: #ede9fe; color: #5b21b6; }
-.k-say_again .chip { background: #fef3c7; color: #92400e; }
+.meter { height: 6px; background: #1c2128; border-radius: 3px; overflow: hidden; }
+.meter div { height: 100%; background: #4b5563; transition: width 80ms linear; }
+.meter div.hot { background: var(--bad); }
+.chip { background: #232933; color: var(--muted); border-radius: 4px; padding: 0 6px; }
+.k-report .chip { background: rgba(52, 211, 153, 0.15); color: var(--ok); }
+.k-order .chip { background: rgba(167, 139, 250, 0.15); color: #c4b5fd; }
+.k-say_again .chip { background: rgba(245, 158, 11, 0.15); color: var(--warn); }
 .log li.tx { padding: 6px 8px; }
-.log li.k-ack, .log li.k-radio_check, .log li.k-call, .log li.k-request { opacity: 0.75; }
-.log li.unid { background: #fef2f2; border-color: #fecaca; }
-.log li.empty { color: #6b7280; border-style: dashed; }
-.how { font-size: 11px; color: #9ca3af; }
+.log li.k-ack, .log li.k-radio_check, .log li.k-call, .log li.k-request { opacity: 0.7; }
+.log li.unid { background: rgba(248, 113, 113, 0.08); border-color: rgba(248, 113, 113, 0.35); }
+.log li.empty { color: var(--muted); border-style: dashed; }
+.how { font-size: 11px; color: #6b7380; }
 .read.gone { text-decoration: line-through; opacity: 0.6; }
-.tick { color: #047857; font-size: 12px; margin-left: 6px; }
-.query { color: #b45309; font-size: 12px; margin-left: 6px; }
-.assumed { color: #6b7280; font-size: 12px; font-style: italic; }
-.heard { font-size: 12px; color: #374151; background: #f3f4f6; padding: 4px 8px; border-radius: 6px; }
-.scrub { display: grid; gap: 4px; color: #6b7280; font-size: 12px; }
+.tick { color: var(--ok); font-size: 12px; margin-left: 6px; }
+.query { color: var(--warn); font-size: 12px; margin-left: 6px; }
+.assumed { color: var(--muted); font-size: 12px; font-style: italic; }
+.gridref { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); margin-left: 4px; white-space: nowrap; }
+.actions { margin-top: 6px; display: flex; align-items: center; }
+.heard { font-size: 12px; color: var(--text); background: #1c2128; padding: 4px 8px; border-radius: 6px; }
+.scrub { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+.scrub input { accent-color: var(--accent); }
 aside > * { flex-shrink: 0; }
 .log { list-style: none; margin: 0; padding: 0; overflow-y: auto; display: grid; gap: 8px; align-content: start; flex: 1 1 auto; min-height: 0; }
-.log li { padding: 8px; border: 1px solid #e5e7eb; border-radius: 8px; }
-.log li.amb { border-style: dashed; border-color: #d97706; }
-.log li.bad { background: #fef2f2; border-color: #fecaca; }
-.log li.intent { background: #f5f3ff; border-color: #ddd6fe; }
-.log li.gone { opacity: 0.55; }
+.log li { padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+.log li.amb { border-style: dashed; border-color: var(--warn); }
+.log li.bad { background: rgba(248, 113, 113, 0.08); border-color: rgba(248, 113, 113, 0.35); }
+.log li.intent { background: rgba(167, 139, 250, 0.08); border-color: rgba(167, 139, 250, 0.35); }
+.log li.gone { opacity: 0.5; }
 .log li.gone .said, .log li.gone .read { text-decoration: line-through; }
-.meta { display: flex; gap: 8px; font-size: 12px; color: #6b7280; flex-wrap: wrap; }
+.meta { display: flex; gap: 8px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
 .said { margin: 2px 0; }
-.read { color: #065f46; }
-.note { color: #92400e; font-size: 12px; }
-@media (max-width: 760px) { .layout { grid-template-columns: 1fr; grid-template-rows: 55vh 1fr; } aside { border-left: 0; } }
+.read { color: #a7f3d0; }
+.note { color: var(--warn); font-size: 12px; }
+@media (max-width: 760px) {
+  .layout { grid-template-columns: 1fr; grid-template-rows: 55vh 1fr; } aside { border-left: 0; border-top: 1px solid var(--line); }
+  .legend { display: none; }
+}
 </style>
