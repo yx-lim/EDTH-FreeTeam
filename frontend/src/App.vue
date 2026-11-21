@@ -156,6 +156,15 @@ const customPlaces = ref([])
 const defaultCentre = ref([2.334, 48.851])
 const callsign = ref('alpha 1')
 const lang = ref('en')
+const zone = ref(null)   // {name, label, lang}: the area of operations the backend runs on
+const zones = ref([])    // every zone with map data (Paris, Irpin, ...)
+// Switch the area of operations on the server; every open screen reloads onto it (map, events and nets differ).
+async function chooseZone(name) {
+  if (name === zone.value?.name) return
+  const r = await fetch('/api/zone', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) })
+  if (r.ok) location.reload()
+  else appAlert.value = (await r.json().catch(() => ({}))).detail || 'Could not switch area of operations'
+}
 const readBack = ref(true)
 const cursor = ref(0)
 const listening = ref(false)
@@ -1366,6 +1375,7 @@ function connect() {
       }
     }
     if (msg.type === 'places') customPlaces.value = msg.places
+    if (msg.type === 'zone' && msg.zone?.name !== zone.value?.name) location.reload()   // switched on another screen
     if (msg.type === 'stt') {
       serverStt.value = msg.provider
       sttOptions.value = msg.available
@@ -1406,6 +1416,9 @@ onMounted(async () => {
   if (state?.centre) defaultCentre.value = state.centre
   serverStt.value = state?.stt ?? null
   sttOptions.value = state?.stt_options ?? []
+  zone.value = state?.zone ?? null
+  zones.value = state?.zones ?? []
+  if (zone.value?.lang && zone.value.name !== 'paris') lang.value = zone.value.lang   // e.g. Irpin: Ukrainian
   customPlaces.value = state?.custom_places ?? []
   offlineMode.value = !!state?.offline
   if (state?.handsets) handsets.value = state.handsets
@@ -1730,6 +1743,9 @@ onUnmounted(() => {
       :threat-count="totalThreatCount"
       :stt-label="sttDisplayLabel"
       :handsets="handsets"
+      :zone="zone"
+      :zones="zones"
+      @choose-zone="chooseZone"
       @toggle-readback="readBack = !readBack"
       @toggle-nvg="toggleNvg"
       @toggle-red-night="toggleRedNight"

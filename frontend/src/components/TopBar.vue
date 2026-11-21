@@ -30,6 +30,8 @@ const props = defineProps({
   hasSos: Boolean,
   threatCount: { type: Number, default: 0 },
   sttLabel: String,
+  zone: { type: Object, default: null },      // {name, label, lang}: the area of operations
+  zones: { type: Array, default: () => [] },  // every zone with map data (Paris, Irpin, ...)
   handsets: { type: Object, default: () => ({ count: 0, transmitting: false, active_callsign: null }) },
 })
 
@@ -40,6 +42,7 @@ const emit = defineEmits([
   'toggle-offline',
   'toggle-confirm-gate',
   'open-phone-mic',
+  'choose-zone',
 ])
 
 const dtg = ref(formatDTG(new Date()))
@@ -63,7 +66,13 @@ onUnmounted(() => {
         <Radio :size="18" />
       </div>
       <div>
-        <p class="eyebrow">C2 COP // AO PARIS</p>
+        <p class="eyebrow">C2 COP // AO
+          <select v-if="zones.length > 1" class="zone-select" :value="zone?.name" title="Area of operations"
+            aria-label="Area of operations" @change="emit('choose-zone', $event.target.value)">
+            <option v-for="z in zones" :key="z.name" :value="z.name">{{ z.label }}</option>
+          </select>
+          <template v-else>{{ (zone?.label || 'Paris').toUpperCase() }}</template>
+        </p>
         <h1>Voice-to-Map</h1>
       </div>
     </div>

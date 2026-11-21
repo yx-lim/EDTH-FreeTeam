@@ -3240,3 +3240,16 @@ select {
     grid-template-columns: 1fr;
   }
 }
+
+/* Area-of-operations picker in the top bar (Paris / Irpin) */
+.zone-select {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 0 4px;
+  margin-left: 4px;
+  cursor: pointer;
+}
+.zone-select option { color: #111; }
