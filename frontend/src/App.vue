@@ -22,16 +22,18 @@ const SIDE = { hostile: { code: 'H', colour: '#f87171', word: 'enemy' }, unknown
 const WHAT = { infantry: ['GPUCI', 'infantry'], sniper: ['GPUCIS', 'sniper'], tank: ['GPEVAT', 'tank'],
   apc: ['GPEVAA', 'armoured vehicle'], vehicle: ['GPEV', 'vehicle'], artillery: ['GPUCF', 'artillery'],
   drone: ['APMFQ', 'drone'], helicopter: ['APMH', 'helicopter'], aircraft: ['APMF', 'aircraft'], ied: ['GPEXI', 'IED'],
-  civilians: ['GP', 'civilians'], unknown: ['GP', 'contact'] }
+  civilians: ['GP', 'civilians'], obstacle: ['GP', 'obstacle'], unknown: ['GP', 'contact'] }
 // How long a sighting stays on the map: a drone has moved on within minutes, an IED stays where it is.
-const CONTACT_TTL_S = { drone: 180, helicopter: 300, aircraft: 120, artillery: 600, sniper: 1800, ied: 86400, civilians: 1800 }
+const CONTACT_TTL_S = { drone: 180, helicopter: 300, aircraft: 120, artillery: 600, sniper: 1800, ied: 86400, obstacle: 86400, civilians: 1800 }
 const contactTtl = (c) => c?.ttl_s || CONTACT_TTL_S[c?.what] || 900
 // Static hazards (mines, IEDs, cables, drones waiting on the ground) never vanish: nobody radios "mine cleared".
 // Past their fresh window they stay, dashed, as "unconfirmed, N h old". Same rule as backend/contact.py persistent().
-const persistent = (c) => c?.what === 'ied' || (c?.ttl_s || 0) >= 1800
+const persistent = (c) => ['ied', 'obstacle'].includes(c?.what) || (c?.ttl_s || 0) >= 1800
 const age = (t) => { const s = Math.max(0, now.value - t); return s < 3600 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} days` }
 const HEADING_DEG = { north: 0, northeast: 45, east: 90, southeast: 135, south: 180, southwest: 225, west: 270, northwest: 315 }
-const sideOf = (c) => SIDE[c?.side] || SIDE.unknown
+// A destroyed bridge or a blocked road is the state of a place, not somebody's kit: its own colour, no side wording.
+const OBSTACLE = { code: 'U', colour: '#fb7185', word: '' }
+const sideOf = (c) => (c?.what === 'obstacle' ? OBSTACLE : SIDE[c?.side] || SIDE.unknown)
 const sidc = (c, doubt) => {
   const f = (WHAT[c?.what] || WHAT.unknown)[0]
   return `S${sideOf(c).code}${f[0]}${doubt ? 'A' : 'P'}${f.slice(2)}`.padEnd(15, '-')
@@ -42,7 +44,7 @@ function describeContact(c, { spoken = false } = {}) {
   const what = c.detail || (WHAT[c.what] || WHAT.unknown)[1]   // detail: "FPV waiting on the ground", "Shahed"
   const n = c.count > 1 ? (spoken ? `${c.count} ` : `${c.count}× `) : ''
   const side = sideOf(c).word ? `${sideOf(c).word} ` : ''
-  const unknown = c.side === 'unknown' || !SIDE[c.side] ? (spoken ? ', side unknown' : ' (side unknown)') : ''
+  const unknown = c.what !== 'obstacle' && (c.side === 'unknown' || !SIDE[c.side]) ? (spoken ? ', side unknown' : ' (side unknown)') : ''
   const act = c.activity === 'moving' ? `, moving${c.heading ? ' ' + c.heading : ''}` : c.activity ? `, ${c.activity}` : ''
   return `${n}${side}${what}${unknown}${act}`
 }
@@ -136,6 +138,7 @@ const contactsOnMap = computed(() => {
   const latest = new Map(), confirmed = new Set()
   visible.value.forEach((e) => {
     if (!isContact(e) || !e.ok || e.superseded) return
+    if (e.cleared) { latest.delete(e.callsign); return }   // "bridge reopened": off the map
     latest.set(e.callsign, e)
     if (e.confirmed) confirmed.add(e.callsign)
   })
@@ -433,8 +436,8 @@ async function netSend(body = netText.value.trim()) {
   await fetch('/api/net/text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: body }) })
 }
 
-async function replayDemo() {
-  const script = ['uk', 'ru'].includes(lang.value) ? 'uk' : 'en'   // the Ukrainian/Russian demo net, or the English/French one
+async function replayDemo(which) {
+  const script = which === 'battle' ? 'battle' : ['uk', 'ru'].includes(lang.value) ? 'uk' : 'en'   // the Ukrainian/Russian demo net, or the English/French one
   const r = await fetch(`/api/net/replay?speed=3&script=${script}`, { method: 'POST' })
   const out = await r.json().catch(() => ({}))
   netMsg.value = r.ok ? `replaying ${out.lines} transmissions over ~${out.seconds} s (3× speed)` : out.detail || `replay failed (${r.status})`
@@ -743,7 +746,8 @@ onUnmounted(() => {
           <label class="filebtn" :class="{ on: netSource === 'file' }">{{ netSource === 'file' ? 'Playing…' : 'Play a recording' }}
             <input type="file" accept="audio/*" @change="netFile" />
           </label>
-          <button type="button" class="quiet" @click="replayDemo">Replay demo net</button>
+          <button type="button" class="quiet" @click="replayDemo()">Replay demo net</button>
+          <button type="button" class="quiet" @click="replayDemo('battle')" title="Ukrainian net: a blown bridge, waiting FPVs, a mine, a blocked road reopened">Replay battle</button>
           <select v-model="lang" title="Speech language"><option value="en">EN</option><option value="fr">FR</option><option value="uk">UK</option><option value="ru">RU</option><option value="auto">Auto</option></select>
         </div>
         <div class="meter" :title="netSpeaking ? 'transmission in progress' : 'channel quiet'">

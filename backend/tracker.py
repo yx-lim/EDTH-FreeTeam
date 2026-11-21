@@ -101,6 +101,15 @@ class Tracker:
         event.update({k: v for k, v in result.items() if k != "_geom"})
         if event["ok"] and geom is not None:
             same = self._same_track(event["contact"], geom, now)
+            if contacts.cleared(event["contact"]):   # "bridge reopened": the obstacle on record there leaves the map
+                if same:
+                    event.update(callsign=same, merged_with=self.tracks[same]["id"], cleared=True,
+                                 seen_by=[s for s in [reporter] if s], corroborated=False, threats=[])
+                    del self.tracks[same]
+                else:
+                    event.update(ok=False, note="no obstacle on record there")
+                self.events.append(event)
+                return event
             if same:   # seen before: one enemy, more evidence, not a second enemy
                 track = self.tracks[same]
                 event.update(callsign=same, merged_with=track["id"],
@@ -139,12 +148,12 @@ class Tracker:
     def _withdraw(self, event: dict) -> None:
         if event.get("type") == "contact":
             track = self.tracks.get(event["callsign"])
-            if track and track["id"] == event["id"]:
+            if event.get("cleared") or (track and track["id"] == event["id"]):   # a rejected "reopened" puts it back
                 prev = next((e for e in reversed(self.events) if e["callsign"] == event["callsign"] and e["id"] != event["id"]
                              and e.get("ok") and e.get("region") and not e.get("superseded")), None)
                 if prev:
                     self._track(prev, self.gaz.proj.to_xy(shape(prev["region"])))
-                else:
+                elif track:
                     del self.tracks[event["callsign"]]
         else:
             fixes = self.history.get(event["callsign"]) or []

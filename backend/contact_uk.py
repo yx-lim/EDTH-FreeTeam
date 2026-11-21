@@ -92,6 +92,21 @@ def heading(text: str) -> str | None:
     return None
 
 
+OBJECTS = {"bridge": _alt("міст", "мост", "моста", "мосту", "місток"), "road": _alt("дорога", "дорогу", "дороги", "вулиця", "улица", "траса", "трасса"),
+           "crossing": _alt("переправа", "переправу", "перехрестя", "перекресток"), "tunnel": _alt("тунель", "туннель"),
+           "building": _alt("будівля", "будинок", "здание", "дом")}
+
+
+_STATE_INDEX = [(r["detail"], lang_uk.index_of({r["spoken"]: "x"})) for r in ROWS if r["what"] == "obstacle"]
+_SEVERITY = ["destroyed", "blocked", "damaged", "reopened"]
+
+
+def obstacle_state(text: str) -> str | None:
+    """"міст знищено, проїзду нема" names two states; the worst one is the news."""
+    said = {state for state, index in _STATE_INDEX if lang_uk.lookup(text, index)}
+    return next((s for s in _SEVERITY if s in said), None)
+
+
 def describe(text: str) -> dict:
     t = fold(text)
     row = threat(text)
@@ -109,6 +124,11 @@ def describe(text: str) -> dict:
     activity = ("firing" if re.search(rf"\b{FIRING}\b", t) else "static" if re.search(rf"\b{STATIC}\b", t)
                 or (row and int(row["ttl_s"] or 0) >= 1800 and what == "drone") else "moving" if head
                 or re.search(rf"\b{MOVING}\b", t) else None)
+    if what == "obstacle":   # the state of a place ("міст знищено"): no side, no count, never moves
+        obj = next((k for k, v in OBJECTS.items() if re.search(rf"\b{v}\b", t)), None)
+        return {"what": what, "side": "unknown", "count": None, "activity": None, "heading": None,
+                "detail": " ".join(filter(None, [obj, obstacle_state(text) or row["detail"]])), "ttl_s": int(row["ttl_s"]),
+                "word": row["spoken"], "another": False}
     return {"what": what, "side": side, "count": int(count) if count else None, "activity": activity, "heading": head,
             "detail": (row or {}).get("detail") or ("group of people" if what == "infantry" else None),
             "ttl_s": int(row["ttl_s"]) if row and row.get("ttl_s") else (900 if what == "infantry" else None),

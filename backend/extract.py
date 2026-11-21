@@ -81,6 +81,9 @@ Rules:
   subject null, the anchor fields saying where the THING is, plus
   "contact": {{"what": one of {contact.WHATS}, "side": one of {contact.SIDES}, "count": number or null,
               "activity": "moving" | "static" | "firing" | null, "heading": compass direction or null}}.
+  A PLACE reported destroyed, damaged, blocked or reopened ("the bridge near the Odeon is destroyed", "міст біля Ромашки
+  знищено, проїзду нема"): what "obstacle", side "unknown", plus "detail": the object and state in English, e.g.
+  "bridge destroyed", "road blocked", "building damaged", "bridge reopened". The anchor is where it is.
   side is "hostile" ONLY if the speaker says enemy/hostile; never infer it. Otherwise "unknown" (civilians: "neutral").
   "300 m east of me" -> anchor {{"name": "me", "kind": "unit"}}, relation "east_of", distance_m 300.
   "moving north" is the heading, not the location. The speaker's own position, if also given, is its own report.
@@ -520,6 +523,9 @@ def stub_extract(text: str) -> dict:
         r = next((x for x in map(_parse_clause, contact.location_clauses(sighting)) if x and x["type"] == "position"), None)
         r = contact.self_anchor({**(r or _other()), "subject": None, "type": "contact"}, speaker)
         r["contact"] = contact.describe(sighting, _number)
+        if r["contact"]["what"] == "obstacle":   # "the bridge / near the Odeon is destroyed": the object may sit in an earlier clause
+            r["contact"]["detail"] = contact.obstacle_detail(t) or r["contact"]["detail"]
+            clauses = [c for c in clauses if not contact.object_only(c)]
         reports.append(r)
     for clause in clauses:
         m = re.match(rf"(?P<s>{_CS})\s+(?:is|est)\b\s*", clause)

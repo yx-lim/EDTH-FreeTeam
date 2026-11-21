@@ -77,3 +77,57 @@ fpv,en,drone,FPV,90,,check,
 цивільні,uk,civilians,civilians,1800,,sourced,
 гражданские,ru,civilians,civilians,1800,,sourced,
 мирні,uk,civilians,civilians,1800,,check,
+знищено,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+знищений,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+знищена,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+зруйновано,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+зруйнований,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+зруйнована,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+підірвано,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+підірваний,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+уничтожен,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+уничтожено,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+разрушен,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+разрушено,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+взорван,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+подорван,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+заблоковано,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+перекрито,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+проїзду нема,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+проїзду немає,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+проходу нема,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+завал,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+заблокирован,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+перекрыт,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+проезда нет,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+прохода нет,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+пошкоджено,uk,obstacle,damaged,86400,,check,state of a place (bridge road building); stays until reported open
+пошкоджений,uk,obstacle,damaged,86400,,check,state of a place (bridge road building); stays until reported open
+пошкоджена,uk,obstacle,damaged,86400,,check,state of a place (bridge road building); stays until reported open
+поврежден,ru,obstacle,damaged,86400,,check,state of a place (bridge road building); stays until reported open
+повреждено,ru,obstacle,damaged,86400,,check,state of a place (bridge road building); stays until reported open
+відновлено,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+проїзд відкрито,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+розблоковано,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+розчищено,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+восстановлен,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+проезд открыт,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+разблокирован,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+расчищен,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+підірвали,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+розбито,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+розбитий,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+впав,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+взорвали,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+разбит,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+рухнул,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
+не проїхати,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+завалило,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+завалено,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+не проехать,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+завалило,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+завален,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
+прохід відкрито,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+можна їхати,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+проход открыт,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+можно ехать,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open

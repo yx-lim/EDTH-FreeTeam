@@ -11,9 +11,42 @@ from __future__ import annotations
 import re
 
 WHATS = ["infantry", "sniper", "tank", "apc", "vehicle", "artillery", "drone", "helicopter", "aircraft", "ied", "civilians",
-         "unknown"]
+         "obstacle", "unknown"]
 # Threats named on their own are a sighting ("IED behind the town hall"); "vehicle" or "infantry" alone are not.
-_ALWAYS = {"tank", "apc", "drone", "helicopter", "aircraft", "artillery", "ied", "sniper", "civilians"}
+_ALWAYS = {"tank", "apc", "drone", "helicopter", "aircraft", "artillery", "ied", "sniper", "civilians", "obstacle"}
+# The state of a PLACE, not a thing seen: "the bridge near the Odeon is destroyed", "road blocked", "bridge reopened".
+# Plotted like a persistent hazard (what "obstacle", detail "bridge destroyed"); "reopened" takes it off the map.
+OBSTACLE_STATES = [
+    ("reopened", r"re ?opened|repaired|passable|open again|now open|rouverte?s?|retablie?s?|reparee?s?"),
+    ("destroyed", r"destroyed|blown up|blown|collapsed|demolished|detruite?s?|effondree?s?"),
+    ("blocked", r"blocked|impassable|no passage|closed|cratered|bloquee?s?|coupee?s?|infranchissables?"),
+    ("damaged", r"damaged|endommagee?s?"),
+]
+_OBSTACLE = "|".join(v for _, v in OBSTACLE_STATES)
+_OBJECTS = {"bridge": r"bridges?|ponts?", "road": r"roads?|streets?|routes?|rues?|msr", "crossing": r"crossings?|junctions?|carrefours?",
+            "tunnel": r"tunnels?", "building": r"buildings?|batiments?|immeubles?", "station": r"stations?|gares?"}
+CLEARED = "reopened"
+
+
+def obstacle_detail(text: str) -> str | None:
+    """"bridge destroyed" / "road blocked" / "reopened": the state, with the kind of object when it is named."""
+    said = {k for k, v in OBSTACLE_STATES if re.search(rf"\b(?:{v})\b", text)}
+    state = next((s for s in ("destroyed", "blocked", "damaged", CLEARED) if s in said), None)   # the worst one said
+    if state is None:
+        return None
+    obj = next((k for k, v in _OBJECTS.items() if re.search(rf"\b(?:{v})\b", text)), None)
+    return f"{obj} {state}" if obj else state
+
+
+def object_only(clause: str) -> bool:
+    """"the bridge" on its own, cut off from "near the Odeon is destroyed" by the clause splitter: not a position."""
+    return bool(re.fullmatch(rf"(?:the |le |la |les |l )?(?:{'|'.join(_OBJECTS.values())})", clause.strip()))
+
+
+def cleared(c: dict | None) -> bool:
+    """Is this the report that an obstacle is gone ("bridge reopened", "проїзд відкрито")?"""
+    c = c or {}
+    return c.get("what") == "obstacle" and str(c.get("detail") or "").endswith(CLEARED)
 SIDES = ["hostile", "unknown", "friendly", "neutral"]
 ACTIVITIES = ["moving", "static", "firing", None]
 
@@ -30,6 +63,7 @@ _WHAT = [
     ("vehicle", r"vehicles?|trucks?|technicals?|pick ?ups?|vehicules?|camions?"),
     ("infantry", r"infantry|troops|soldiers|personnel|squad|platoon|dismounts?|fantassins?|soldats?|combattants?"),
     ("civilians", r"civilians?|refugees?|civils?|crowd|foule|refugies?"),
+    ("obstacle", _OBSTACLE),
 ]
 WHAT_RE = "|".join(f"(?P<{k}>\\b(?:{v})\\b)" for k, v in _WHAT)
 
@@ -78,7 +112,10 @@ def describe(clauses: list[str], number) -> dict:
         hm = re.search(_MOVING + r"\s+" + _HEADING, text)
         if hm:
             heading = _FR_DIRS.get(hm.group("h"), hm.group("h"))
-    return {"what": what, "side": side, "count": int(count) if count else None, "activity": activity, "heading": heading}
+    out = {"what": what, "side": side, "count": int(count) if count else None, "activity": activity, "heading": heading}
+    if what == "obstacle":   # a place's state: no side, no count, it does not move, and it stays until reported open
+        out.update(side="unknown", count=None, activity=None, heading=None, detail=obstacle_detail(text), ttl_s=TTL_S["obstacle"])
+    return out
 
 
 def location_clauses(clauses: list[str]) -> list[str]:
@@ -89,6 +126,7 @@ def location_clauses(clauses: list[str]) -> list[str]:
         c = re.sub(_MOVING + r"\s+" + _HEADING, " ", c)
         c = re.sub(_MOVING + r"\s+(?:towards?|to|vers)\s+.*", " ", c)   # a destination, not where it is now
         c = re.sub(r"\b(?:contact|spotted|sighted|observed|i see|we see|i can see|we can see|repere|on voit|je vois)\b", " ", c)
+        c = re.sub(rf"\b(?:(?:is|are|was|has been|have been|est|sont) )?(?:now |completely |totally |partly )?(?:{_OBSTACLE})\b", " ", c)
         c = re.sub(r"\s+", " ", c).strip(" ,")
         if c:
             out.append(c)
@@ -133,12 +171,12 @@ def validate(c: dict | None) -> dict:
 
 # How long a sighting stays current (the map fades it after this): a drone has moved on in minutes, an IED stays.
 # frontend/src/App.vue (CONTACT_TTL_S) mirrors this table.
-TTL_S = {"drone": 180, "helicopter": 300, "aircraft": 120, "artillery": 600, "sniper": 1800, "ied": 86400,
+TTL_S = {"drone": 180, "helicopter": 300, "aircraft": 120, "artillery": 600, "sniper": 1800, "ied": 86400, "obstacle": 86400,
          "civilians": 1800}
 DEFAULT_TTL_S = 900
 # How far a contact can plausibly have moved between two reports, for deciding whether two sightings are one.
 SPEED_MPS = {"infantry": 1.5, "sniper": 1.0, "civilians": 1.5, "tank": 8.0, "apc": 10.0, "vehicle": 12.0,
-             "drone": 15.0, "helicopter": 40.0, "aircraft": 100.0, "artillery": 0.0, "ied": 0.0, "unknown": 3.0}
+             "drone": 15.0, "helicopter": 40.0, "aircraft": 100.0, "artillery": 0.0, "ied": 0.0, "obstacle": 0.0, "unknown": 3.0}
 SAME_PLACE_M = 75        # two sightings this close (edge to edge, plus movement) can be the same thing
 WARN_M = 300             # a friendly unit this close to a hostile contact is warned
 # Things that hurt whoever walks up to them, whoever owns them: a waiting FPV ("ждун"), a mine, a tripwire, a gun, a
@@ -174,6 +212,8 @@ def compatible(a: dict, b: dict) -> bool:
         return False
     # Two named types that differ are two things: a Shahed is not the recon quad seen a minute ago. A generic word
     # ("drone", "пташка") can still be either.
+    if a["what"] == b["what"] == "obstacle":   # damaged, then destroyed, then reopened: one place, its state changing
+        return True
     generic = {None, "drone", "quadcopter", "vehicle", "infantry", "group of people", "fixed-wing drone"}
     if a.get("detail") not in generic and b.get("detail") not in generic and a.get("detail") != b.get("detail"):
         return False
@@ -207,14 +247,14 @@ def persistent(c: dict | None) -> bool:
     """Static hazards (mines, IEDs, fibre-optic cables, drones waiting on the ground) are never removed by age: nobody
     radios "mine cleared". Past their fresh window they stay on the map as "unconfirmed, N h old"."""
     c = c or {}
-    return c.get("what") == "ied" or (c.get("ttl_s") or 0) >= 1800
+    return c.get("what") in ("ied", "obstacle") or (c.get("ttl_s") or 0) >= 1800
 
 
 # --- APP-6 / MIL-STD-2525C symbol codes, for exports (frontend/src/App.vue draws the same codes) -------------------
 _SIDE_CODE = {"hostile": "H", "unknown": "U", "neutral": "N", "friendly": "F"}
 _FUNCTION = {"infantry": "GPUCI", "sniper": "GPUCIS", "tank": "GPEVAT", "apc": "GPEVAA", "vehicle": "GPEV",
              "artillery": "GPUCF", "drone": "APMFQ", "helicopter": "APMH", "aircraft": "APMF", "ied": "GPEXI",
-             "civilians": "GP", "unknown": "GP"}
+             "civilians": "GP", "obstacle": "GP", "unknown": "GP"}
 OWN_UNIT = "GPUCI"   # friendly infantry
 
 
