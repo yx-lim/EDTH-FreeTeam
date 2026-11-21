@@ -1,0 +1,16 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+dist/
+data/events.jsonl
+.DS_Store
+data/custom_places.json
+data/*.wav
+data/*.times.json
+data/net.jsonl
+.venv-icloud-old/
+frontend/node_modules-icloud-old/
+.venv
+node_modules

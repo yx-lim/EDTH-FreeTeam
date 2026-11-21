@@ -1,0 +1,25 @@
+{
+  "_note": "Spoken name -> exact OSM name in data/gazetteer.json. Keys are matched after lower-casing and stripping accents and 'the'. Add the names your users actually say; they are also sent to speech-to-text as vocabulary.",
+  "aliases": {
+    "town hall": "Mairie du 6e arrondissement",
+    "city hall": "Mairie du 6e arrondissement",
+    "mairie": "Mairie du 6e arrondissement",
+    "mairie du 6e": "Mairie du 6e arrondissement",
+    "saint sulpice fountain": "Fontaine des Quatre Évêques",
+    "fountain of the four bishops": "Fontaine des Quatre Évêques",
+    "four bishops fountain": "Fontaine des Quatre Évêques",
+    "big fountain": "Fontaine des Quatre Évêques",
+    "fontaine saint sulpice": "Fontaine des Quatre Évêques",
+    "luxembourg palace": "Palais du Luxembourg",
+    "senate": "Palais du Luxembourg",
+    "senat": "Palais du Luxembourg",
+    "medici fountain": "Fontaine Médicis",
+    "odeon theatre": "Odéon–Théâtre de l'Europe",
+    "theatre de l odeon": "Odéon–Théâtre de l'Europe",
+    "saint germain market": "Marché Saint-Germain - alimentaire",
+    "marche saint germain": "Marché Saint-Germain - alimentaire",
+    "luxembourg gardens": "Jardin du Luxembourg",
+    "luxembourg garden": "Jardin du Luxembourg",
+    "jardin du luxembourg": "Jardin du Luxembourg"
+  }
+}
