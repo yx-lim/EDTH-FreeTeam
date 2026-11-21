@@ -61,6 +61,8 @@ const customPlaces = ref([])
 const text = ref('')
 const callsign = ref('alpha 1')
 const lang = ref('en')
+// Speech language: the browser recogniser, read-back voice and server speech-to-text hint. Auto lets the server decide.
+const SPEECH_LANG = { en: 'en-GB', fr: 'fr-FR', uk: 'uk-UA', ru: 'ru-RU', auto: 'en-GB' }
 const readBack = ref(true)
 const cursor = ref(0)          // history scrubber: show events[0..cursor)
 const listening = ref(false)
@@ -264,7 +266,7 @@ function speak(e) {
     const who = e.speaker || 'Station'
     msg = e.ok ? `${who}, contact, ${describeContact(e.contact, { spoken: true })}, ${e.parsed?.relation === 'at' ? 'at' : (e.parsed?.relation || '').replaceAll('_', ' ')} ${e.anchor}.`
       : `${who}, contact copied. Say again its location.`
-  } else if (e.type === 'unidentified') msg = lang.value === 'fr' ? 'Station qui appelle, répétez votre indicatif.' : 'Station calling, say again your callsign.'
+  } else if (e.type === 'unidentified') msg = { fr: 'Station qui appelle, répétez votre indicatif.', uk: 'Хто на зв\'язку, повторіть позивний.', ru: 'Кто на связи, повторите позывной.' }[lang.value] || 'Station calling, say again your callsign.'
   else if (e.ok) msg = `${e.callsign}, ${e.parsed?.relation === 'at' ? 'at' : (e.parsed?.relation || '').replaceAll('_', ' ')} ${e.anchor}`
   else if (e.type === 'intent') msg = `${e.callsign}, copy intention.`
   else msg = `${e.callsign}, say again. ${e.note || ''}`
@@ -273,7 +275,7 @@ function speak(e) {
   if (warn.length) msg = `Warning. ${warn.join(' ')} ${msg}`
   window.speechSynthesis.cancel()             // never queue up old read-backs behind the new one
   const u = new SpeechSynthesisUtterance(msg)
-  u.lang = lang.value === 'fr' ? 'fr-FR' : 'en-GB'
+  u.lang = SPEECH_LANG[lang.value]
   window.speechSynthesis.speak(u)
 }
 
@@ -345,7 +347,7 @@ async function recordStop(handle) {
 // nothing sent twice, a quick release-then-press loses nothing, and a quick tap never leaves the microphone on.
 let held = false
 const browserPtt = Speech && createBrowserPtt({
-  Speech, lang: () => (lang.value === 'fr' ? 'fr-FR' : 'en-GB'),
+  Speech, lang: () => SPEECH_LANG[lang.value],
   onSend: (t) => send(t, { voice: true }), onHeard: (h) => { heard.value = h }, onListening: (v) => { listening.value = v },
 })
 const recorderPtt = createRecorderPtt({
@@ -374,7 +376,8 @@ async function netSend(body = netText.value.trim()) {
 }
 
 async function replayDemo() {
-  const r = await fetch('/api/net/replay?speed=3', { method: 'POST' })
+  const script = ['uk', 'ru'].includes(lang.value) ? 'uk' : 'en'   // the Ukrainian/Russian demo net, or the English/French one
+  const r = await fetch(`/api/net/replay?speed=3&script=${script}`, { method: 'POST' })
   const out = await r.json().catch(() => ({}))
   netMsg.value = r.ok ? `replaying ${out.lines} transmissions over ~${out.seconds} s (3× speed)` : out.detail || `replay failed (${r.status})`
 }
@@ -401,7 +404,7 @@ function queueSegment(samples, rate, startedAt, seconds) {
 function browserNet() {
   // No server speech-to-text: the browser's own recogniser, kept running, one final result per transmission.
   netRecogniser = new Speech()
-  netRecogniser.lang = lang.value === 'fr' ? 'fr-FR' : 'en-GB'
+  netRecogniser.lang = SPEECH_LANG[lang.value]
   netRecogniser.continuous = true
   netRecogniser.onresult = (r) => {
     for (let i = r.resultIndex; i < r.results.length; i++) {
@@ -652,7 +655,7 @@ onUnmounted(() => {
             <input type="file" accept="audio/*" @change="netFile" />
           </label>
           <button type="button" class="quiet" @click="replayDemo">Replay demo net</button>
-          <select v-model="lang" title="Speech language"><option value="en">EN</option><option value="fr">FR</option></select>
+          <select v-model="lang" title="Speech language"><option value="en">EN</option><option value="fr">FR</option><option value="uk">UK</option><option value="ru">RU</option><option value="auto">Auto</option></select>
         </div>
         <div class="meter" :title="netSpeaking ? 'transmission in progress' : 'channel quiet'">
           <div :style="{ width: meter + '%' }" :class="{ hot: netSpeaking }"></div>
@@ -670,7 +673,7 @@ onUnmounted(() => {
       <form v-else @submit.prevent="send()">
         <div class="row">
           <label>Default callsign <input v-model="callsign" class="callsign" /></label>
-          <select v-model="lang" title="Speech language"><option value="en">EN</option><option value="fr">FR</option></select>
+          <select v-model="lang" title="Speech language"><option value="en">EN</option><option value="fr">FR</option><option value="uk">UK</option><option value="ru">RU</option><option value="auto">Auto</option></select>
         </div>
         <textarea v-model="text" rows="2" placeholder="e.g. Zero, this is Alpha two, south of the church, over"
           @keydown.enter.exact.prevent="send()"></textarea>

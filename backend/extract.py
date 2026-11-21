@@ -53,6 +53,21 @@ Rules:
   side is "hostile" ONLY if the speaker says enemy/hostile; never infer it. Otherwise "unknown" (civilians: "neutral").
   "300 m east of me" -> anchor {{"name": "me", "kind": "unit"}}, relation "east_of", distance_m 300.
   "moving north" is the heading, not the location. The speaker's own position, if also given, is its own report.
+Ukrainian and Russian (and mixtures with English, "surzhyk"):
+- Procedure: "Вежа, я Сокіл, ..., прийом" = "Tower, this is Sokil, ..., over": the speaker is the word after "я"
+  ("this is"), lowercase as spoken ("сокіл", "граніт 2"). "Башня" is the Russian "Вежа" (control). "прийом"/"приём" =
+  over. "плюс"/"прийняв"/"принял" = roger (type "other"). "мінус"/"отставить"/"відставити" = correction.
+  "без змін"/"без изменений"/"там само" = holding. "буду через ..." = intent.
+- Keep place names and codenames in the original language and script, in the nominative case if obvious
+  ("від Сараю" -> "Сарай", "на Ромашці" -> "Ромашка", "орієнтир три" -> "Орієнтир 3"). Never translate them.
+- Number words become numbers ("двісті п'ятдесят" -> 250, "полтораста" -> 150). "метрів сто" (number after the unit)
+  is approximate: add "vague": true to the report.
+- Directions: "на схід від X"/"восточнее X"/"к востоку от X" -> east_of X; same for the other seven.
+- Sightings: drone slang is a "drone" contact: ждун (FPV waiting on the ground: activity "static"), мопед/шахед
+  (Shahed), пташка/птичка (any drone), мавік (recon quad), орлан (recon wing), ланцет, фпв. "бачу трьох" (I see three)
+  is infantry, count 3. Put the word as spoken in "contact.word". "ворог"/"противник" = hostile. "ще один"/"ещё один"
+  = another one: "contact.another": true. "над X" (above X) -> relation "at" X; "над нами" -> anchor kind "unit", name
+  "me". "йде на схід"/"курс захід" is the heading, not the location.
 Never output coordinates. Never invent a place that was not spoken.
 
 Examples:
@@ -63,7 +78,11 @@ Examples:
 "Alpha deux, je me dirige vers le boulevard Saint-Germain" ->
 {{"speaker":"alpha 2","reports":[{{"subject":null,"type":"movement","anchor":{{"name":"boulevard Saint-Germain","kind":"street"}},"anchor2":null,"relation":"towards","distance_m":null,"minutes_ago":null,"confidence":0.9}}]}}
 "Zero, Bravo one, contact, two enemy tanks moving north, three hundred metres east of the church, over" ->
-{{"speaker":"bravo 1","reports":[{{"subject":null,"type":"contact","anchor":{{"name":"church","kind":"landmark"}},"anchor2":null,"relation":"east_of","distance_m":300,"minutes_ago":null,"confidence":0.8,"contact":{{"what":"tank","side":"hostile","count":2,"activity":"moving","heading":"north"}}}}]}}"""
+{{"speaker":"bravo 1","reports":[{{"subject":null,"type":"contact","anchor":{{"name":"church","kind":"landmark"}},"anchor2":null,"relation":"east_of","distance_m":300,"minutes_ago":null,"confidence":0.8,"contact":{{"what":"tank","side":"hostile","count":2,"activity":"moving","heading":"north"}}}}]}}
+"Вежа, я Граніт, мінус, мінус, не Сарай. Сто метрів на південь від Ромашки, прийом." ->
+{{"speaker":"граніт","reports":[{{"subject":null,"type":"correction","anchor":{{"name":"Ромашка","kind":"landmark"}},"anchor2":null,"relation":"south_of","distance_m":100,"minutes_ago":null,"confidence":0.9}}]}}
+"Вежа, я Лис, ждун біля Сараю, метрів п'ятдесят на захід, не підходити, прийом." ->
+{{"speaker":"лис","reports":[{{"subject":null,"type":"contact","anchor":{{"name":"Сарай","kind":"landmark"}},"anchor2":null,"relation":"west_of","distance_m":50,"vague":true,"minutes_ago":null,"confidence":0.8,"contact":{{"what":"drone","side":"unknown","count":1,"activity":"static","heading":null,"word":"ждун"}}}}]}}"""
 
 
 async def extract(text: str) -> dict:
@@ -75,6 +94,8 @@ async def extract(text: str) -> dict:
         try:
             out = await _mistral(text, key)
             out["extractor"] = f"mistral:{MISTRAL_MODEL}"
+            if lang_uk.has_cyrillic(text):
+                _enrich_uk(out, text)
         except Exception as err:  # network, quota, malformed JSON: degrade, don't drop the report
             out = stub_extract(text)
             out["extractor"] = f"rules (mistral failed: {type(err).__name__})"
@@ -107,6 +128,21 @@ def _callsign(text: str | None) -> str | None:
     for w, d in _DIGITS.items():
         t = re.sub(rf"\b{w}\b", d, t)
     return t or None
+
+
+def _enrich_uk(out: dict, text: str) -> None:
+    """The model names the thing; the vocabulary knows how long it matters and which systems only the enemy flies.
+    Adds detail / ttl_s (and hostile for Shahed, Orlan, Lancet...) to Ukrainian/Russian sightings from the model."""
+    from . import contact_uk
+    for r in out["reports"]:
+        if r["type"] != "contact":
+            continue
+        known = contact_uk.describe(r["contact"].get("word") or text)
+        c = r["contact"]
+        for k in ("detail", "ttl_s", "word"):
+            c[k] = c.get(k) or known.get(k)
+        if known["side"] == "hostile" and c["side"] == "unknown":
+            c["side"] = "hostile"
 
 
 def validate(d: dict) -> dict:

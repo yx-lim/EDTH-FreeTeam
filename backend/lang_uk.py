@@ -442,3 +442,10 @@ def stub_extract_uk(text: str) -> dict:
         reports = [{"subject": None, "type": "other", "anchor": None, "anchor2": None, "relation": "at",
                     "distance_m": None, "minutes_ago": None, "confidence": 0.0}]
     return {"speaker": speaker, "reports": reports}
+
+
+def vocabulary() -> list[str]:
+    """Words to prime speech-to-text with for a Ukrainian/Russian net: callsigns, procedure, the commonest threats."""
+    from . import contact_uk
+    words = callsign_names() + ["прийом", "приём", "плюс", "мінус", "кінець зв'язку", "без змін", "доповідай"]
+    return list(dict.fromkeys(words + [r["spoken"] for r in contact_uk.ROWS][:30]))

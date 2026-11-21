@@ -88,6 +88,30 @@ The frame shape, not only the colour, carries the side, so it still reads in nig
 A single report is dashed until the duty officer confirms it; contacts then fade by type (a drone after 3 minutes,
 vehicles and troops after 15, an IED after a day). The **Contacts** button hides or shows them.
 
+## Ukrainian and Russian
+
+Pick **UK** or **RU** (or **Auto**) as the speech language, or type:
+*"Вежа, я Граніт, ждун біля Сараю, метрів п'ятдесят на захід, не підходити, прийом."*
+**Replay demo net** with UK or RU selected plays `data/demo_net_uk.jsonl`: positions, a correction, an order, and
+sightings that merge across units.
+
+| Heard | Read as |
+|---|---|
+| "Вежа, я Сокіл, …, прийом" / "Башня, я Сокол, …, приём" | Сокіл speaking to control; прийом = over |
+| "Сокол", "Гранит" | the same units as Сокіл, Граніт (`data/callsigns.json`) |
+| "на Ромашці", "від Сараю", "второй посадкой" | codenames Ромашка, Сарай, Друга посадка, with case endings (`data/codenames.json`) |
+| "двісті п'ятдесят метрів", "полтораста", "метрів сто" | 250 m, 150 m, about 100 m (vague) |
+| "мінус, мінус, не Сарай …", "без змін", "буду через …" | correction, holding, intent |
+| "ждун", "мопед", "пташка", "мавік", "міна", "бачу трьох" | waiting FPV (30 min), Shahed (enemy, 2 min), drone, recon quad, mine (6 h), three people |
+| "ще один ждун" | a second drone, never merged with the first |
+| "мопед пройшов над палацом на захід" | over the palace, heading west |
+
+Without a key the rules cover this demo grammar only (`backend/lang_uk.py`, `backend/contact_uk.py`); free speech
+needs Mistral, whose prompt now covers Ukrainian/Russian procedure and drone slang. A Cyrillic place that matches no
+codename or alias is reported unknown, never guessed. Codenames rotate daily: replace `data/codenames.json` each
+morning. Threat words, lifetimes and which systems count as enemy-only are in `data/threat_vocab.csv` (from a
+teammate's list; rows marked `check` are unverified).
+
 ## What it understands
 
 | Spoken | Result |

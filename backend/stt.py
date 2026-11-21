@@ -23,6 +23,11 @@ STT_MODEL = os.getenv("STT_MODEL", "voxtral-mini-transcribe-3")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 _whisper = None
+# Whisper's initial_prompt sets the expected language and style as much as the words: a Ukrainian prompt keeps
+# Ukrainian in Cyrillic instead of transliterating or translating it.
+PROMPTS = {"en": "Radio position report. Places: ", "fr": "Compte rendu radio de position. Lieux : ",
+           "uk": "Радіообмін. Вежа, я Сокіл, прийом. Позивні та орієнтири: ",
+           "ru": "Радиообмен. Башня, я Сокол, приём. Позывные и ориентиры: "}
 _whisper_lock = threading.Lock()
 # One thread owns the model, so two quick presses queue rather than compete for the CPU.
 _whisper_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper")
@@ -78,6 +83,10 @@ async def transcribe(audio: bytes, vocabulary: list[str], language: str | None =
     name = provider()
     if name is None:
         raise RuntimeError("no speech-to-text provider: set MISTRAL_API_KEY or install faster-whisper")
+    language = None if language in (None, "", "auto") else language
+    if language in ("uk", "ru"):   # callsigns, procedure words and drone slang first: they are what gets misheard
+        from . import lang_uk
+        vocabulary = list(dict.fromkeys(lang_uk.vocabulary() + vocabulary))
     t0 = time.perf_counter()
     text = await (_mistral(audio, vocabulary, language) if name == "mistral" else _local(audio, vocabulary, language))
     return {"text": text.strip(), "provider": name, "stt_ms": round((time.perf_counter() - t0) * 1000)}
@@ -97,7 +106,7 @@ async def _mistral(audio: bytes, vocabulary: list[str], language: str | None) ->
 async def _local(audio: bytes, vocabulary: list[str], language: str | None) -> str:
     def run() -> str:
         segments, _ = _load_whisper().transcribe(_pcm(audio), language=language, vad_filter=True,
-                                          initial_prompt="Radio position report. Places: " + ", ".join(vocabulary[:40]))
+                                          initial_prompt=PROMPTS.get(language, PROMPTS["en"]) + ", ".join(vocabulary[:40]))
         return " ".join(s.text for s in segments)
 
     return await asyncio.get_running_loop().run_in_executor(_whisper_thread, run)
