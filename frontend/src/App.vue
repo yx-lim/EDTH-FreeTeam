@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import maplibregl from 'maplibre-gl'
 import ms from 'milsymbol'
 import { createVad } from './vad.js'
+import { createBrowserPtt, createRecorderPtt } from './ptt.js'
 import { gridLines, mgrsAt } from './grid.js'
 
 // Own units only, so cool colours: on a NATO map red means hostile and yellow means unknown.
@@ -46,7 +47,7 @@ watch([basemap, showGrid, night], () => {
   try { localStorage.setItem('mapLook', JSON.stringify({ basemap: basemap.value, showGrid: showGrid.value, night: night.value })) } catch {}
 })
 const cursorGrid = ref('')     // MGRS under the mouse (or of the map centre on touch screens)
-let map, recogniser, press, recorder, stream, chunks, ticker, socket, unmounted = false
+let map, netRecogniser, ticker, socket, unmounted = false
 
 // Radio-net mode: listen to the whole channel, no button, no callsign picker.
 const mode = ref('ptt')               // 'ptt' (push-to-talk) | 'net'
@@ -219,20 +220,24 @@ function encodeWav(samples, rate) {
   return buf
 }
 
+// Each press gets its own stream, recorder and chunks, so an overlapping press can never mix or leak them.
 async function recordStart() {
-  stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, noiseSuppression: true, echoCancellation: true } })
-  chunks = []
-  recorder = new MediaRecorder(stream)
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, noiseSuppression: true, echoCancellation: true } })
+  const chunks = [], recorder = new MediaRecorder(stream)
   recorder.ondataavailable = (e) => chunks.push(e.data)
   recorder.start()
+  return { stream, recorder, chunks }
 }
 
-async function recordStop() {
-  if (!recorder) return
+async function recordHalt({ stream, recorder }) {
   const stopped = new Promise((r) => { recorder.onstop = r })
   recorder.stop(); await stopped
   stream.getTracks().forEach((t) => t.stop())
-  recorder = null
+}
+
+async function recordStop(handle) {
+  await recordHalt(handle)
+  const { chunks } = handle
   const ctx = new AudioContext()
   const decoded = await ctx.decodeAudioData(await new Blob(chunks).arrayBuffer())
   ctx.close()
@@ -250,59 +255,28 @@ async function recordStop() {
     : `heard: “${out.transcript}”`
 }
 
+// Push-to-talk. The state machines live in ptt.js (tested in frontend/tests/ptt.test.js): one press = one report,
+// nothing sent twice, a quick release-then-press loses nothing, and a quick tap never leaves the microphone on.
+let held = false
+const browserPtt = Speech && createBrowserPtt({
+  Speech, lang: () => (lang.value === 'fr' ? 'fr-FR' : 'en-GB'),
+  onSend: (t) => send(t, { voice: true }), onHeard: (h) => { heard.value = h }, onListening: (v) => { listening.value = v },
+})
+const recorderPtt = createRecorderPtt({
+  open: recordStart, close: recordStop, discard: recordHalt, onListening: (v) => { listening.value = v },
+})
+
 async function talk(start) {
-  if (!canListen.value || start === listening.value) return
-  listening.value = start
-  if (serverStt.value && canRecord) {
-    try { start ? await recordStart() : await recordStop() } catch (err) { heard.value = `microphone: ${err.message}`; listening.value = false }
-    return
-  }
-  // Browser recogniser: one press = one transmission = one report. Chrome fires onresult many times while it refines
-  // its guess, so collect only final pieces while the button is held and send the whole thing once, on release.
-  // Chrome also ends a session by itself (a few seconds of silence, network hiccups) while the key is still held: then
-  // keep what was heard and start a new session, so the press only ends when the key or button is released.
-  if (start) {
-    recogniser?.abort()                       // a late event from an earlier press must not send again
-    const p = { held: true, pieces: [], failed: false }
-    press = p
-    const session = () => {
-      const rec = new Speech(), finals = []
-      let interim = ''
-      rec.lang = lang.value === 'fr' ? 'fr-FR' : 'en-GB'
-      rec.continuous = true                   // a pause mid-sentence must not end the transmission
-      rec.interimResults = true               // live text; sent only if the key is released before it turns final
-      const text = () => [...p.pieces, ...finals.filter(Boolean), interim.trim()].filter(Boolean).join(' ').trim()
-      rec.onresult = (r) => {
-        if (rec !== recogniser) return
-        interim = ''
-        for (let i = r.resultIndex; i < r.results.length; i++) {
-          if (r.results[i].isFinal) finals[i] = r.results[i][0].transcript.trim()
-          else interim += r.results[i][0].transcript
-        }
-        heard.value = `hearing: “${text()}”`
-      }
-      rec.onerror = (e) => {
-        if (rec !== recogniser || e.error === 'aborted' || e.error === 'no-speech') return
-        p.failed = true
-        heard.value = `speech: ${e.error}`
-      }
-      rec.onend = () => {                     // after stop(), with every final result delivered
-        if (rec !== recogniser) return
-        const t = text()
-        if (p.held && !p.failed) { p.pieces = t ? [t] : []; session(); return }   // ended by Chrome, key still down
-        recogniser = null
-        press = null
-        listening.value = false
-        if (t) send(t, { voice: true })
-        else if (!p.failed) heard.value = 'heard nothing'   // keep an error from onerror on screen
-      }
-      recogniser = rec
-      rec.start()
-    }
-    session()
-  } else {
-    if (press) press.held = false
-    recogniser?.stop()                        // onend sends the transmission
+  if (!canListen.value || start === held) return
+  if (start && netOn.value && netSource.value === 'browser') { heard.value = 'stop the radio net first: the browser has one recogniser'; return }
+  held = start
+  try {
+    if (serverStt.value && canRecord) await (start ? recorderPtt.press() : recorderPtt.release())
+    else start ? browserPtt.press() : browserPtt.release()
+  } catch (err) {
+    heard.value = `microphone: ${err.message}`
+    held = false
+    listening.value = false
   }
 }
 
@@ -340,18 +314,18 @@ function queueSegment(samples, rate, startedAt, seconds) {
 
 function browserNet() {
   // No server speech-to-text: the browser's own recogniser, kept running, one final result per transmission.
-  recogniser = new Speech()
-  recogniser.lang = lang.value === 'fr' ? 'fr-FR' : 'en-GB'
-  recogniser.continuous = true
-  recogniser.onresult = (r) => {
+  netRecogniser = new Speech()
+  netRecogniser.lang = lang.value === 'fr' ? 'fr-FR' : 'en-GB'
+  netRecogniser.continuous = true
+  netRecogniser.onresult = (r) => {
     for (let i = r.resultIndex; i < r.results.length; i++) {
       if (!r.results[i].isFinal) continue
       const t = r.results[i][0].transcript.trim()
       if (t) { netSegments.value++; netMsg.value = `heard: “${t}”`; netSend(t) }
     }
   }
-  recogniser.onend = () => { if (netOn.value && netSource.value === 'browser') recogniser.start() }
-  recogniser.start()
+  netRecogniser.onend = () => { if (netOn.value && netSource.value === 'browser') netRecogniser.start() }
+  netRecogniser.start()
   netSource.value = 'browser'
   netOn.value = true
   netMsg.value = 'listening with the browser recogniser (server speech-to-text is off)'
@@ -396,7 +370,7 @@ async function netStart(file) {
 
 async function netStop() {
   netVad?.flush()
-  recogniser && netSource.value === 'browser' && recogniser.stop()
+  netRecogniser && netSource.value === 'browser' && netRecogniser.stop()
   netNode?.disconnect(); netAudio?.pause(); netStream?.getTracks().forEach((t) => t.stop())
   await netCtx?.close().catch(() => {})
   netCtx = netNode = netAudio = netStream = netVad = null
@@ -409,6 +383,9 @@ function netFile(ev) { const f = ev.target.files?.[0]; ev.target.value = ''; if 
 const typing = (e) => ['TEXTAREA', 'INPUT', 'SELECT'].includes(e.target.tagName)
 function keydown(e) { if (mode.value !== 'ptt') return; if (e.code === 'Space' && !e.repeat && !typing(e)) { e.preventDefault(); talk(true) } }
 function keyup(e) { if (mode.value !== 'ptt') return; if (e.code === 'Space' && !typing(e)) { e.preventDefault(); talk(false) } }
+// Releasing Space in another window never reaches us: losing focus ends the press, or the microphone stays on.
+function blur() { talk(false) }
+function hidden() { if (document.hidden) talk(false) }
 
 // One socket per page. On unmount (a hot reload while developing) it is closed for good: a leftover socket would keep
 // running the old handlers, and every copy would read each report back aloud.
@@ -517,6 +494,8 @@ onMounted(async () => {
   ticker = setInterval(() => { now.value = Date.now() / 1000 }, 5000)
   window.addEventListener('keydown', keydown)
   window.addEventListener('keyup', keyup)
+  window.addEventListener('blur', blur)
+  document.addEventListener('visibilitychange', hidden)
 })
 
 onUnmounted(() => {
@@ -527,6 +506,8 @@ onUnmounted(() => {
   clearInterval(ticker)
   window.removeEventListener('keydown', keydown)
   window.removeEventListener('keyup', keyup)
+  window.removeEventListener('blur', blur)
+  document.removeEventListener('visibilitychange', hidden)
 })
 </script>
 
