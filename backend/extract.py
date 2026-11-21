@@ -252,6 +252,9 @@ def stub_extract(text: str) -> dict:
     t = _prep(text)
     speaker, subjects = None, None
     m = re.match(rf"(?:hello\s+|allo\s+)?(?P<to>{_CS})\s*,?\s*(?:this is|ici|de)\s+(?P<frm>{_CS})\b[\s,]*", t)
+    # No addressee, as people often speak: "This is Delta three, behind the church", maybe after a false start
+    # ("this is, hi, this is Delta three"). Up to five words may come before the last "this is <callsign>".
+    m = m or re.match(rf"(?:[\w']+[\s,]+){{0,5}}?(?:this is|ici)\s+(?P<frm>{_CS})\b[\s,]*", t)
     if m:
         speaker, t = _callsign(m.group("frm")), t[m.end():]
     else:

@@ -46,7 +46,7 @@ watch([basemap, showGrid, night], () => {
   try { localStorage.setItem('mapLook', JSON.stringify({ basemap: basemap.value, showGrid: showGrid.value, night: night.value })) } catch {}
 })
 const cursorGrid = ref('')     // MGRS under the mouse (or of the map centre on touch screens)
-let map, recogniser, press, recorder, stream, chunks, ticker
+let map, recogniser, press, recorder, stream, chunks, ticker, socket, unmounted = false
 
 // Radio-net mode: listen to the whole channel, no button, no callsign picker.
 const mode = ref('ptt')               // 'ptt' (push-to-talk) | 'net'
@@ -405,10 +405,14 @@ const typing = (e) => ['TEXTAREA', 'INPUT', 'SELECT'].includes(e.target.tagName)
 function keydown(e) { if (mode.value !== 'ptt') return; if (e.code === 'Space' && !e.repeat && !typing(e)) { e.preventDefault(); talk(true) } }
 function keyup(e) { if (mode.value !== 'ptt') return; if (e.code === 'Space' && !typing(e)) { e.preventDefault(); talk(false) } }
 
+// One socket per page. On unmount (a hot reload while developing) it is closed for good: a leftover socket would keep
+// running the old handlers, and every copy would read each report back aloud.
 function connect() {
+  if (unmounted) return
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws`)
+  socket = ws
   ws.onopen = () => { status.value = 'live' }
-  ws.onclose = () => { status.value = 'reconnecting…'; setTimeout(connect, 1500) }
+  ws.onclose = () => { if (unmounted) return; status.value = 'reconnecting…'; setTimeout(connect, 1500) }
   ws.onmessage = (m) => {
     const msg = JSON.parse(m.data)
     if (msg.type === 'event') add(msg.event)
@@ -511,6 +515,9 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  unmounted = true
+  socket?.close()
+  window.speechSynthesis?.cancel()
   netStop()
   clearInterval(ticker)
   window.removeEventListener('keydown', keydown)
