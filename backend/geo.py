@@ -107,7 +107,9 @@ def words(text: str) -> list[str]:
             t = lang_uk.fold(t)
             if t in STOP_CYR:
                 continue
-            t = lang_uk.STREET_WORDS.get(t, t)   # "улица", "ул", "вул" -> "вулиця"
+            t = lang_uk.STREET_WORDS.get(t) or next(   # "улица", "ул", "вул", "на улице", "вулиці" -> "вулиця"
+                (v for k, v in lang_uk.STREET_WORDS.items() if len(k) >= 5 and lang_uk.same_word(t, k)
+                 and abs(len(t) - len(k)) <= 2), t)
         elif t in STOP:
             continue
         out.append(FOLD.get(t, t))
@@ -473,9 +475,11 @@ class Gazetteer:
     def inside(self, geom_xy: BaseGeometry) -> bool:
         if not self.bbox:
             return True
-        s, w, n, e = self.bbox
-        ll = self.proj.to_ll(geom_xy.centroid)
-        return s <= ll.y <= n and w <= ll.x <= e
+        if getattr(self, "_bbox_xy", None) is None:
+            s, w, n, e = self.bbox
+            self._bbox_xy = self.proj.to_xy(shapely.box(w, s, e, n))
+        # Inside if any of it is: a long embankment whose middle lies just past the edge is still in the area.
+        return geom_xy.intersects(self._bbox_xy)
 
     def to_xy_ll(self, lon: float, lat: float) -> BaseGeometry:
         return self.proj.to_xy(Point(lon, lat))

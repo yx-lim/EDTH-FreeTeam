@@ -152,6 +152,14 @@ def latin(text: str) -> str:
 
 # --- inflected names ----------------------------------------------------------------------------------------------
 
+_ADJ_END = re.compile(r"(?:ого|ому|ими|ии|ои|ою|им|их|ая|ое|ые|ую|ей|а|я|е|и|у|ю)$")
+
+
+def _adj_stem(w: str) -> str:
+    """A folded word without its adjective ending (folded forms: "литнього" -> "литн", "литнии" -> "литн")."""
+    return _ADJ_END.sub("", w)
+
+
 def same_word(a: str, b: str) -> bool:
     """Case endings change the last letters only: "ромашка" / "ромашци" / "ромашкою" match, "романа" does not."""
     if a == b:
@@ -166,6 +174,8 @@ def same_word(a: str, b: str) -> bool:
         if x != y:
             break
         common += 1
+    if min(len(a), len(b)) >= 5 and _adj_stem(a) == _adj_stem(b) and len(_adj_stem(a)) >= 4:
+        return True   # "Літнього" / "Літній", "Центральної" / "Центральна": adjective endings
     shortest = min(len(a), len(b))
     # Stems of longer words keep at least 5 letters, so a consonant change in the ending ("ромашка" / "ромашці")
     # still matches but a different word with the same first syllables ("романа") does not.
@@ -478,7 +488,7 @@ _REL_WORDS = [
     (_alt("всередині", "всередину", "в середині", "внутри", "на території", "на территории", "у дворі", "во дворе"),
      "inside"),
     (_alt("в районі", "в районе", "у районі", "в околицях", "в окрестностях", "десь біля", "где-то возле",
-          "десь в районі", "в межах"), "around"),
+          "десь в районі", "в межах", "з району", "из района", "з боку", "со стороны"), "around"),
     (_alt("не доходячи до", "не доходя до", "не доїжджаючи до", "не доезжая до", "трохи не дійшовши до", "перед"),
      "in_front_of"),
     (_alt("по той бік", "по тій стороні", "по ту сторону", "на тому боці", "на той стороне", "за межами", "пройшовши",
@@ -708,6 +718,12 @@ def stub_extract_uk(text: str) -> dict:
     if seen is not None:
         said = ", ".join(clauses[seen:])
         s = contact_uk.report(said, speaker)
+        if s["contact"]["what"] == "obstacle" and not (s.get("anchor") or {}).get("name") and seen > 0 \
+                and (a := _anchor(clauses[seen - 1])):
+            # "Соборна вулиця, проїзд відкрито": the place, then its state in the next clause
+            s.update(anchor=a, relation="at")
+            clauses = clauses[:seen - 1] + clauses[seen:]
+            seen -= 1
         c, located = s["contact"], bool((s.get("anchor") or {}).get("name"))
         if re.search(CLOCK, said):   # "ждун на дванадцяту годину, двісті метрів": that far from the reporter, way unknown
             s.update(anchor={"name": speaker or "me", "kind": "unit"}, anchor2=None, relation="from",
@@ -726,7 +742,21 @@ def stub_extract_uk(text: str) -> dict:
     t = re.sub(r"\bне\s+(?!доход|доиждж|доезж|дойд)[^,.;]*", " ", ", ".join(clauses))
     intent = bool(re.search(rf"\b{INTENT}\b", t))
     reports, subjects = [], set()
+    gm = re.search(r"(?:квадрат|сітк|сетк|координат|грід|грид)\w*\s+(?P<g>[0-9A-Za-z][0-9A-Za-z ]{3,30})", body, re.I)
+    if gm and not sightings:   # "квадрат 049 002": a grid reference (validate() reads and checks it)
+        reports.append({"subject": None, "type": "correction" if correction else "position",
+                        "anchor": {"name": gm["g"].strip(), "kind": "grid"}, "anchor2": None, "relation": "at",
+                        "distance_m": None, "minutes_ago": None, "confidence": 0.7})
+        t = ""
     for clause in filter(None, (c.strip() for c in re.split(r"\s*[,.;!?]\s*", t))):
+        # "Сокіл і Граніт на перехресті ...": two units, one place
+        pair = re.match(r"(?P<a>\S+)\s+(?:и|та|and)\s+(?P<b>\S+)\s+(?P<rest>.+)", clause)
+        if pair and _known_callsign(pair["a"]) and _known_callsign(pair["b"]) and parse_location(pair["rest"]):
+            for cs in (_known_callsign(pair["a"]), _known_callsign(pair["b"])):
+                if cs not in subjects:
+                    reports.append({**parse_location(pair["rest"]), "subject": None if cs == speaker else cs})
+                    subjects.add(cs)
+            continue
         # "Сокіл на Сараї, я на Ромашці": a clause that opens with another callsign is about that unit
         first, _, rest = clause.partition(" ")
         subject = _known_callsign(first) if rest else None

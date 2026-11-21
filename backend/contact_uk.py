@@ -197,4 +197,14 @@ def locate(text: str, speaker: str | None) -> dict:
 def report(sighting: str, speaker: str | None) -> dict:
     out = {"subject": None, "type": "contact", "anchor2": None, "minutes_ago": None, "confidence": 0.5,
            **locate(sighting, speaker), "contact": describe(sighting)}
+    if not (out.get("anchor") or {}).get("name") and out["contact"]["what"] == "obstacle":
+        # "вулиця Соборна заблокована", "Соборна вулиця, проїзд відкрито": the place is what the state is about
+        states = [lang_uk.fold(r["spoken"]).split()[-1] for r in ROWS if r["what"] == "obstacle"]
+        for clause in filter(None, (c.strip() for c in re.split(r"\s*[,.;]\s*", location_text(sighting)))):
+            # drop the state in any form ("заблокована" as well as "заблоковано")
+            clause = " ".join(w for w in clause.split() if not any(lang_uk.same_word(w, st) for st in states))
+            a = lang_uk._anchor(clause)
+            if a:
+                out.update(anchor=a, relation="at")
+                break
     return out

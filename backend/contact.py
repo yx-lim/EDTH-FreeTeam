@@ -80,7 +80,8 @@ _HEADING = (r"\b(?:towards? (?:the )?|to the |vers le |vers l |au |a l )?(?P<h>n
 _FR_DIRS = {"nord": "north", "sud": "south", "est": "east", "ouest": "west", "nord est": "northeast",
             "nord ouest": "northwest", "sud est": "southeast", "sud ouest": "southwest"}
 # "300 metres east of me": the reporter is the reference point.
-SELF = r"(?:me|us|my position|our position|my location|moi|nous|ma position|notre position)"
+SELF = (r"(?:me|us|my position|our position|my location|moi|nous|ma position|notre position"
+        r"|мене|мною|нас|нами|себе|меня|мной|себя|моеи позиции|нашои позиции|моей позиции|нашей позиции)")
 
 
 def starts_contact(clause: str) -> bool:
