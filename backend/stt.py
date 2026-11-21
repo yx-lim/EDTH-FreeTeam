@@ -1,7 +1,11 @@
 """Speech-to-text for push-to-talk clips (16 kHz mono WAV from the browser).
 
+The operator can switch provider while the app runs (the dropdown in the app, POST /stt); that choice lasts until the
+backend restarts.
+
 Providers, picked by STT_PROVIDER or automatically (in this order):
   elevenlabs  ElevenLabs Scribe. Needs ELEVENLABS_API_KEY. Strong on Ukrainian and Russian.
+  gemini   Gemini listening to the clip, primed with the place names. Needs GEMINI_API_KEY. Only used when chosen.
   mistral  Voxtral via Mistral's API, primed with the district's place names (context_bias). Needs MISTRAL_API_KEY.
   whisper  faster-whisper running locally, primed through initial_prompt. Offline. `pip install faster-whisper`.
            Default `small` on the CPU: ~2-3 s a clip on an M-series Mac. large-v3-turbo is more accurate (12% vs 19%
@@ -11,6 +15,7 @@ Providers, picked by STT_PROVIDER or automatically (in this order):
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import os
 import threading
@@ -23,6 +28,9 @@ STT_URL = "https://api.mistral.ai/v1/audio/transcriptions"
 STT_MODEL = os.getenv("STT_MODEL", "voxtral-mini-transcribe-3")
 ELEVENLABS_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 ELEVENLABS_MODEL = os.getenv("ELEVENLABS_STT_MODEL", "scribe_v1")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+GEMINI_STT_MODEL = os.getenv("GEMINI_STT_MODEL") or os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+LANGUAGES = {"en": "English", "fr": "French", "uk": "Ukrainian", "ru": "Russian"}
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 _whisper = None
@@ -69,19 +77,45 @@ def warm() -> None:
         _whisper_thread.submit(_load_whisper)
 
 
+_chosen: str | None = None   # set from the app at run time; overrides STT_PROVIDER until restart
+KEYS = {"elevenlabs": "ELEVENLABS_API_KEY", "gemini": "GEMINI_API_KEY", "mistral": "MISTRAL_API_KEY"}
+LABELS = {"elevenlabs": "ElevenLabs", "gemini": "Gemini", "mistral": "Mistral Voxtral", "whisper": "Whisper (local)"}
+
+
+def _whisper_installed() -> bool:
+    try:
+        import faster_whisper  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def available() -> list[str]:
+    """Providers that can run now: cloud ones with a key, Whisper when installed."""
+    out = [name for name, key in KEYS.items() if os.getenv(key)]
+    return out + (["whisper"] if _whisper_installed() else [])
+
+
+def choose(name: str) -> str | None:
+    """Switch provider from the app. "none" turns server speech-to-text off (the browser's own takes over)."""
+    global _chosen
+    if name != "none" and name not in available():
+        raise ValueError(f"{name} is not available: add its key to .env or install it")
+    _chosen = name
+    if name == "whisper":
+        _whisper_thread.submit(_load_whisper)   # load now, so the next press does not wait for the model
+    return provider()
+
+
 def provider() -> str | None:
-    chosen = os.getenv("STT_PROVIDER")
+    chosen = _chosen or os.getenv("STT_PROVIDER")
     if chosen:
         return None if chosen == "none" else chosen
     if os.getenv("ELEVENLABS_API_KEY"):
         return "elevenlabs"
     if os.getenv("MISTRAL_API_KEY"):
         return "mistral"
-    try:
-        import faster_whisper  # noqa: F401
-        return "whisper"
-    except ImportError:
-        return None
+    return "whisper" if _whisper_installed() else None
 
 
 async def transcribe(audio: bytes, vocabulary: list[str], language: str | None = None) -> dict:
@@ -93,7 +127,7 @@ async def transcribe(audio: bytes, vocabulary: list[str], language: str | None =
         from . import lang_uk
         vocabulary = list(dict.fromkeys(lang_uk.vocabulary() + vocabulary))
     t0 = time.perf_counter()
-    run = {"elevenlabs": _elevenlabs, "mistral": _mistral}.get(name, _local)
+    run = {"elevenlabs": _elevenlabs, "gemini": _gemini, "mistral": _mistral}.get(name, _local)
     text = await run(audio, vocabulary, language)
     return {"text": text.strip(), "provider": name, "stt_ms": round((time.perf_counter() - t0) * 1000)}
 
@@ -118,6 +152,22 @@ async def _elevenlabs(audio: bytes, vocabulary: list[str], language: str | None)
                               headers={"xi-api-key": os.environ["ELEVENLABS_API_KEY"]})
         r.raise_for_status()
     return r.json().get("text", "")
+
+
+async def _gemini(audio: bytes, vocabulary: list[str], language: str | None) -> str:
+    said = f"The speaker uses {LANGUAGES[language]}. " if language in LANGUAGES else ""
+    prompt = ("Transcribe this military radio transmission word for word, in the language and script spoken (keep "
+              "Ukrainian and Russian in Cyrillic; never translate). Output only the transcript, no notes. " + said +
+              "Callsigns, procedure words and place names likely to be heard: " + ", ".join(vocabulary[:100]))
+    payload = {"contents": [{"role": "user", "parts": [
+        {"text": prompt}, {"inlineData": {"mimeType": "audio/wav", "data": base64.b64encode(audio).decode()}}]}],
+        "generationConfig": {"temperature": 0}}
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(GEMINI_URL.format(model=GEMINI_STT_MODEL), json=payload,
+                              headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]})
+        r.raise_for_status()
+    parts = r.json()["candidates"][0]["content"].get("parts") or []
+    return "".join(p.get("text", "") for p in parts)
 
 
 async def _local(audio: bytes, vocabulary: list[str], language: str | None) -> str:

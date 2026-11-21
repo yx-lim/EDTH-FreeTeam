@@ -73,6 +73,15 @@ const cursor = ref(0)          // history scrubber: show events[0..cursor)
 const listening = ref(false)
 const status = ref('connecting…')
 const serverStt = ref(null)    // provider name when the backend can transcribe, else null
+const sttOptions = ref([])     // providers the backend can use now (a key in .env, or Whisper installed)
+const STT_LABELS = { elevenlabs: 'ElevenLabs', gemini: 'Gemini', mistral: 'Mistral', whisper: 'Whisper (local)' }
+// Switch speech-to-text on the server; every open screen hears the change over the WebSocket.
+async function chooseStt(name) {
+  const r = await fetch('/api/stt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: name }) })
+  if (!r.ok) { heard.value = (await r.json().catch(() => ({}))).detail || 'could not switch speech-to-text'; return }
+  const out = await r.json()
+  serverStt.value = out.provider; sttOptions.value = out.available
+}
 const heard = ref('')
 const now = ref(Date.now() / 1000)
 // Map look is a per-screen preference, remembered in this browser only (storage can be blocked: then defaults).
@@ -536,6 +545,7 @@ function connect() {
       if (e) { e.superseded = true; events.value = [...events.value] }
     }
     if (msg.type === 'places') customPlaces.value = msg.places
+    if (msg.type === 'stt') { serverStt.value = msg.provider; sttOptions.value = msg.available }
     if (msg.type === 'tx') txs.value.push(msg.tx)
     if (msg.type === 'annotate') {
       const e = events.value.find((x) => x.id === msg.id)
@@ -549,6 +559,7 @@ onMounted(async () => {
   const state = await fetch('/api/state').then((r) => r.json()).catch(() => null)
   if (!state) status.value = 'backend not reachable on :8000'
   serverStt.value = state?.stt ?? null
+  sttOptions.value = state?.stt_options ?? []
   customPlaces.value = state?.custom_places ?? []
   map = new maplibregl.Map({
     container: 'map', center: state?.centre ?? [2.334, 48.851], zoom: 15.5,
@@ -689,7 +700,13 @@ onUnmounted(() => {
     <aside>
       <header>
         <h1>Voice-to-Map</h1>
-        <span class="status">{{ status }} · speech: {{ serverStt || (Speech ? 'browser' : 'none') }}</span>
+        <span class="status">{{ status }} · speech:
+          <select v-if="sttOptions.length" class="stt" :value="serverStt || 'none'" title="Speech-to-text"
+            @change="chooseStt($event.target.value)">
+            <option v-for="p in sttOptions" :key="p" :value="p">{{ STT_LABELS[p] || p }}</option>
+            <option value="none">{{ Speech ? 'Browser' : 'Off' }}</option>
+          </select>
+          <template v-else>{{ serverStt || (Speech ? 'browser' : 'none') }}</template></span>
       </header>
 
       <div class="tabs" role="tablist">
@@ -879,6 +896,7 @@ aside { display: flex; flex-direction: column; gap: 12px; padding: 14px; overflo
 header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 h1 { font-size: 15px; margin: 0; letter-spacing: 0.08em; text-transform: uppercase; }
 .status { color: var(--muted); font-size: 12px; text-align: right; }
+.status select.stt { padding: 1px 4px; font-size: 12px; }
 form { display: grid; gap: 8px; }
 textarea, input.callsign, select, input.wide { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
   background: var(--bg); color: var(--text); }

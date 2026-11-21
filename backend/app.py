@@ -179,7 +179,28 @@ async def net_replay(speed: float = 3.0, script: str = "en") -> dict:
 def state() -> dict:
     return {"centre": [gaz.proj.lon0, gaz.proj.lat0], "bbox": gaz.bbox, "places": len(gaz.places),
             "events": [tracker.public(e) for e in tracker.events], "custom_places": gaz.custom(),
-            "transmissions": net.transmissions[-500:], "stt": stt.provider()}
+            "transmissions": net.transmissions[-500:], "stt": stt.provider(), "stt_options": stt.available()}
+
+
+class SttChoice(BaseModel):
+    provider: str
+
+
+@app.get("/stt")
+def stt_get() -> dict:
+    return {"provider": stt.provider(), "available": stt.available()}
+
+
+@app.post("/stt")
+async def stt_set(body: SttChoice) -> dict:
+    """Switch speech-to-text while running (elevenlabs | gemini | mistral | whisper | none). Lasts until restart."""
+    try:
+        stt.choose(body.provider)
+    except ValueError as err:
+        raise HTTPException(400, str(err)) from err
+    out = {"provider": stt.provider(), "available": stt.available()}
+    await broadcast({"type": "stt", **out})
+    return out
 
 
 @app.post("/places")

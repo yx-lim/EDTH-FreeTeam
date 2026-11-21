@@ -32,7 +32,8 @@ Open http://localhost:5173, hold **Space** (or the button) and say
 `Zero, this is Alpha two, south of the Saint-Sulpice church, over`. Or type it.
 
 Copy `.env.example` to `.env` and add keys. With `GEMINI_API_KEY`, Gemini (`gemini-3.5-flash-lite`, ~1 s) reads the
-reports; with `ELEVENLABS_API_KEY`, ElevenLabs Scribe does speech-to-text. A Mistral key works for both too. With no
+reports; with `ELEVENLABS_API_KEY`, ElevenLabs Scribe does speech-to-text. The **speech** dropdown at the top of the panel
+switches speech-to-text live between ElevenLabs, Gemini, local Whisper and the browser (until the backend restarts). A Mistral key works for both too. With no
 keys everything runs offline apart from the map tiles: a rule-based extractor (English, French, Ukrainian demo
 grammar) and local Whisper (`pip install faster-whisper`) or the browser's speech recognition. If a cloud call fails,
 the report still goes through the rules, so the map never stops.
@@ -144,10 +145,10 @@ is silent. The event log (`data/events.jsonl`) is replayed on restart.
 | `backend/tracker.py` | Per-callsign state, corrections, holding/intent/history, combining clues, event log and replay |
 | `backend/resolver.py` | One report to a region; one rule per spatial relation; speed check |
 | `backend/geo.py` | Gazetteer: aliases, fuzzy names, custom points, street graph and walking regions |
-| `backend/stt.py` | Speech-to-text: ElevenLabs Scribe, Voxtral with place-name vocabulary (`context_bias`), or local faster-whisper |
+| `backend/stt.py` | Speech-to-text, switchable at run time (`GET/POST /stt`): ElevenLabs Scribe, Gemini, Voxtral with place-name vocabulary (`context_bias`), or local faster-whisper |
 | `backend/net.py` | Radio-net mode: split at "over"; speaker, addressee and kind (report, request, order, ack, say again, radio check); acks, repeats, taskings |
 | `backend/vad.py`, `frontend/src/vad.js` | Energy voice-activity detection that cuts a channel into transmissions (server for recordings, browser live) |
-| `backend/app.py` | FastAPI: `POST /report`, `POST /audio`, `POST /net/text`, `POST /net/audio`, `POST /net/recording`, `POST /net/replay`, `GET /state`, `POST /places`, `POST /events/{id}/confirm`, `POST /events/{id}/reject`, `GET /picture.nvg`, `GET /picture.geojson`, `GET /export.geojson`, `POST /reset`, `WS /ws` |
+| `backend/app.py` | FastAPI: `POST /report`, `POST /audio`, `POST /net/text`, `POST /net/audio`, `POST /net/recording`, `POST /net/replay`, `GET /state`, `GET/POST /stt`, `POST /places`, `POST /events/{id}/confirm`, `POST /events/{id}/reject`, `GET /picture.nvg`, `GET /picture.geojson`, `GET /export.geojson`, `POST /reset`, `WS /ws` |
 | `data/aliases.json` | Spoken names to OSM names; also sent to speech-to-text as vocabulary |
 | `data/demo_net.jsonl`, `scripts/make_demo_net.py` | Scripted demo net, and a synthetic radio recording of it |
 | `scripts/fetch_district.py` | Rebuild `data/gazetteer.json` for any bounding box |
@@ -184,6 +185,8 @@ What this repo can do now, grouped by area. Updated after each major implementat
 - **Offline speech-to-text**: local Whisper runs with no internet, so the demo survives bad Wi-Fi.
 - **Cloud models**: ElevenLabs Scribe for speech-to-text and Gemini for reading reports, picked automatically when
   their keys are in `.env`; any failure falls back to the offline path.
+- **Speech dropdown**: switch speech-to-text live between ElevenLabs, Gemini, Whisper and the browser. On test clips
+  all three got English and Ukrainian right; ElevenLabs was fastest (~0.6 s), then Gemini (~1.5 s), Whisper (~3 s).
 
 ### 2. Understanding Ukrainian and Russian
 - Ukrainian, Russian and mixed reports work in the language model, the speech-to-text and the UI.

@@ -53,3 +53,38 @@ def test_elevenlabs_transcribe(monkeypatch):
     monkeypatch.setattr(stt, "_elevenlabs", fake)
     out = asyncio.run(stt.transcribe(b"wav", [], "uk"))
     assert out["provider"] == "elevenlabs" and out["text"] == "Zero, this is Alpha two." and seen["language"] == "uk"
+
+
+def test_switch_provider_at_run_time(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "e")
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.setattr(stt, "_whisper_installed", lambda: False)
+    assert stt.available() == ["elevenlabs", "gemini"] and stt.provider() == "elevenlabs"
+    assert stt.choose("gemini") == "gemini"
+    assert stt.choose("none") is None                      # browser speech recognition takes over
+    import pytest
+    with pytest.raises(ValueError):
+        stt.choose("mistral")                              # no key: refused, choice unchanged
+    assert stt.provider() is None
+
+
+def test_stt_endpoint(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import backend.app as app_module
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.setattr(stt, "_whisper_installed", lambda: False)
+    client = TestClient(app_module.app)
+    assert client.post("/stt", json={"provider": "gemini"}).json() == {"provider": "gemini", "available": ["gemini"]}
+    assert client.get("/state").json()["stt"] == "gemini"
+    assert client.post("/stt", json={"provider": "elevenlabs"}).status_code == 400
+
+
+def test_gemini_transcribe(monkeypatch):
+    async def fake(audio, vocabulary, language):
+        return "Вежа, я Сокіл, прийом.\n"
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.setattr(stt, "_gemini", fake)
+    stt.choose("gemini")
+    out = asyncio.run(stt.transcribe(b"wav", [], "uk"))
+    assert out["provider"] == "gemini" and out["text"] == "Вежа, я Сокіл, прийом."
