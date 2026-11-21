@@ -17,3 +17,4 @@ node_modules
 data/zones/*/events.jsonl
 data/zones/*/net.jsonl
 data/zones/*/custom_places.json
+.local_certs/

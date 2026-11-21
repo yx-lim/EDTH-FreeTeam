@@ -14,6 +14,7 @@ from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 
 from . import contact as contacts
+from . import geo_agent
 from .extract import extract
 from .geo import Gazetteer, norm
 from .resolver import bearing, resolve
@@ -38,7 +39,8 @@ class Tracker:
     # --- public --------------------------------------------------------------------------------
     async def ingest(self, text: str, default_callsign: str | None = None, now: float | None = None,
                      source: str = "text", stt: dict | None = None, *, speaker: str | None = None,
-                     parsed: dict | None = None, replaces: int | None = None, extra: dict | None = None) -> list[dict]:
+                     parsed: dict | None = None, replaces: int | None = None, extra: dict | None = None,
+                     heading: float | None = None) -> list[dict]:
         """speaker / parsed: set by the radio-net layer, which has already worked out who is talking and parsed
         the text. replaces: an event the speaker was asked to repeat ("say again"); the repeat supersedes it."""
         now = time.time() if now is None else now
@@ -50,6 +52,8 @@ class Tracker:
         named = bool(speaker or parsed["speaker"])
 
         def stamp(event: dict, **more) -> dict:
+            if event.get("ok") and event.get("centre") and not event.get("mgrs"):
+                event["mgrs"] = geo_agent.format_mgrs(event["centre"][1], event["centre"][0])
             event.update(source=source, extractor=parsed.get("extractor"), transcript_meta=stt, **(extra or {}), **more,
                          latency_ms={"stt": (stt or {}).get("stt_ms"), "extract": parsed.get("extract_ms"),
                                      "total": round((time.perf_counter() - t0) * 1000) + ((stt or {}).get("stt_ms") or 0)})
@@ -60,7 +64,7 @@ class Tracker:
             return []   # chatter ("hello hello"): no callsign, no place, no procedure. Nothing to log or plot.
         if not named and not default_callsign:
             # An enemy tank at the church is worth plotting whoever saw it; the reporter's own position is held.
-            out = [stamp(self._contact(r, None, text, now)) for r in contacts]
+            out = [stamp(await self._contact(r, None, text, now, heading=heading)) for r in contacts]
             if any(r["type"] != "other" for r in own) or not contacts:
                 out.append(self._hold(text, {**parsed, "reports": own}, now, source, stt))
             return out
@@ -73,16 +77,18 @@ class Tracker:
             by_subject.setdefault(r.get("subject") or speaker, []).append(r)
         out = []
         for subject, reports in by_subject.items():
-            event = self._apply(subject, speaker, reports, text, now, replaces if subject == speaker else None)
+            event = await self._apply(subject, speaker, reports, text, now, replaces if subject == speaker else None, heading=heading)
             fix = (self.history.get(subject) or [None])[-1]
             if event["ok"] and fix and fix[0] == event["id"]:
                 event["threats"] = self._threats_near(subject, fix[1], now)   # walked up to a known enemy?
             out.append(stamp(event, callsign_assumed=not named and subject == speaker))
         # After the speaker's own position, so "200 m north of me" is measured from where they say they are now;
         # listed first, because a sighting matters more than a position update.
-        return [stamp(self._contact(r, speaker, text, now), callsign_assumed=not named) for r in contacts] + out
+        contact_events = [stamp(await self._contact(r, speaker, text, now, heading=heading), callsign_assumed=not named) for r in contacts]
+        return contact_events + out
 
-    def _contact(self, report: dict, reporter: str | None, text: str, now: float) -> dict:
+    async def _contact(self, report: dict, reporter: str | None, text: str, now: float,
+                       heading: float | None = None) -> dict:
         """A sighting becomes its own track ("contact 3"), never a fix in any unit's history."""
         units = self.units()
         n = 1 + len({e["callsign"] for e in self.events if e.get("type") == "contact"})
@@ -96,7 +102,13 @@ class Tracker:
         else:
             # The reporter's position is the viewpoint ("behind the town hall" as seen from them). No walking-speed
             # check: a drone or a tank is not limited by how far a soldier can walk.
-            result = resolve(report, self.gaz, last=units.get(reporter) if reporter else None, units=units)
+            rep_last = units.get(reporter) if reporter else None
+            result = resolve(report, self.gaz, last=rep_last, units=units, heading_deg=heading)
+            if geo_agent.needs_ai_verification(text, report, result, self.gaz):
+                ai_res = await geo_agent.resolve_with_ai(text, report, self.gaz, last=rep_last, units=units, heading_deg=heading)
+                if ai_res and ai_res.get("ok"):
+                    result = ai_res
+            result = await geo_agent.enrich_ambiguous_candidates(report, result, self.gaz, last=rep_last)
         geom = result.get("_geom")
         event.update({k: v for k, v in result.items() if k != "_geom"})
         if event["ok"] and geom is not None:
@@ -144,6 +156,85 @@ class Tracker:
             return None
         self._withdraw(event)
         return self.annotate(event_id, rejected=True, superseded=True, rejected_at=time.time())
+
+    def pick_candidate(self, event_id: int, index: int) -> dict | None:
+        """Operator disambiguates an unclear place ('which tower?') by picking one of candidate_options."""
+        event = self.get(event_id)
+        if event is None:
+            return None
+        opts = event.get("candidate_options") or []
+        if not (0 <= index < len(opts)):
+            return None
+        chosen = opts[index]
+        geom = self.gaz.proj.to_xy(shape(chosen["region"]))
+        fields = {
+            "ok": True,
+            "anchor": chosen["name"],
+            "centre": chosen["centre"],
+            "mgrs": chosen.get("mgrs") or geo_agent.format_mgrs(chosen["centre"][1], chosen["centre"][0]),
+            "radius_m": chosen["radius_m"],
+            "region": chosen["region"],
+            "ambiguous": False,
+            "confirmed": True,
+            "confirmed_at": time.time(),
+            "candidate_options": [],
+            "alternatives": [],
+            "note": f"Operator disambiguated → {chosen['name']}",
+        }
+        self.annotate(event_id, **fields)
+        if event.get("type") == "contact":
+            self._track(event, geom)
+        else:
+            fixes = self.history.setdefault(event["callsign"], [])
+            updated = False
+            for i, (fid, _, ft) in enumerate(fixes):
+                if fid == event_id:
+                    fixes[i] = (fid, geom, ft)
+                    updated = True
+            if not updated:
+                fixes.append((event_id, geom, event["t"]))
+        return event
+
+    def edit_event(
+        self,
+        event_id: int,
+        *,
+        count: int | None = None,
+        side: str | None = None,
+        what: str | None = None,
+        activity: str | None = None,
+        heading: str | None = None,
+    ) -> dict | None:
+        """Operator factual correction (e.g., 2 tanks -> 3 tanks, unknown -> hostile) reflected live on the map."""
+        event = self.get(event_id)
+        if event is None:
+            return None
+        fields: dict = {"edited_at": time.time()}
+        parsed = dict(event.get("parsed") or {})
+        if event.get("type") == "contact":
+            c = dict(event.get("contact") or {})
+            if count is not None:
+                c["count"] = max(1, int(count))
+                parsed["quantity"] = c["count"]
+            if side in ("hostile", "unknown", "neutral", "friendly"):
+                c["side"] = side
+            if what:
+                c["what"] = what
+                c["detail"] = None
+            if activity is not None:
+                c["activity"] = activity or None
+            if heading is not None:
+                c["heading"] = heading or None
+            fields["contact"] = c
+            fields["parsed"] = parsed
+            if event["callsign"] in self.tracks and self.tracks[event["callsign"]]["id"] == event_id:
+                self.tracks[event["callsign"]]["contact"] = c
+        else:
+            if count is not None:
+                parsed["quantity"] = max(1, int(count))
+                fields["parsed"] = parsed
+        self.annotate(event_id, **fields)
+        return event
 
     def _withdraw(self, event: dict) -> None:
         if event.get("type") == "contact":
@@ -263,8 +354,8 @@ class Tracker:
         return {k: v for k, v in event.items() if not k.startswith("_")}
 
     # --- internals -----------------------------------------------------------------------------
-    def _apply(self, subject: str, speaker: str, reports: list[dict], text: str, now: float,
-               replaces: int | None = None) -> dict:
+    async def _apply(self, subject: str, speaker: str, reports: list[dict], text: str, now: float,
+                     replaces: int | None = None, heading: float | None = None) -> dict:
         event = {"id": len(self.events) + 1, "t": now, "callsign": subject, "speaker": speaker, "text": text,
                  "parsed": reports[0], "type": reports[0]["type"], "ok": False, "superseded": False}
         if all(r["type"] == "other" for r in reports):
@@ -276,10 +367,16 @@ class Tracker:
             event["corrects"] = wrong[0]
         # A correction still names places relative to what was just said ("east of the church, not south"),
         # so the withdrawn fix stays the context for resolving names; it just no longer counts as a position.
-        fix = wrong or (self.history.get(subject) or [None])[-1]
+        fixes = self.history.get(subject) or []
+        fix = wrong or (fixes[-1] if fixes else None)
         last_geom = fix[1] if fix else None
         elapsed = max(0.0, now - fix[2]) if fix else None   # replays can deliver times out of order
         others = {cs: g for cs, g in self.units().items() if cs != subject}
+        unit_heading = heading
+        if unit_heading is None and len(fixes) >= 2:
+            a, b = fixes[-2][1].centroid, fixes[-1][1].centroid
+            if a.distance(b) > 5:
+                unit_heading = bearing(a, b)
 
         results = []
         for r in reports:
@@ -294,7 +391,15 @@ class Tracker:
             elif r["relation"] == "previous":
                 results.append(self._previous(subject, now, r.get("minutes_ago")))
             else:
-                results.append(resolve(r, self.gaz, last=last_geom, elapsed_s=elapsed, units=others))
+                res = resolve(r, self.gaz, last=last_geom, elapsed_s=elapsed, units=others, heading_deg=unit_heading)
+                if geo_agent.needs_ai_verification(text, r, res, self.gaz):
+                    ai_res = await geo_agent.resolve_with_ai(
+                        text, r, self.gaz, last=last_geom, elapsed_s=elapsed, units=others, heading_deg=unit_heading,
+                    )
+                    if ai_res and ai_res.get("ok"):
+                        res = ai_res
+                res = await geo_agent.enrich_ambiguous_candidates(r, res, self.gaz, last=last_geom)
+                results.append(res)
 
         oks = [x for x in results if x["ok"]]
         if not oks:

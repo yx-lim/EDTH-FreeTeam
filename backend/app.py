@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import time
 from pathlib import Path
 
@@ -17,7 +18,8 @@ from pydantic import BaseModel
 load_dotenv()
 
 from . import export as exports  # noqa: E402
-from . import stt, vad  # noqa: E402  (after load_dotenv so keys are visible)
+from . import extract as extractor  # noqa: E402
+from . import msg_ingest, stt, vad  # noqa: E402  (after load_dotenv so keys are visible)
 from .geo import Gazetteer  # noqa: E402
 from .net import Net  # noqa: E402
 from .tracker import Tracker  # noqa: E402
@@ -54,12 +56,34 @@ def use_zone(name: str) -> None:
 
 use_zone(zone.NAME)
 clients: set[WebSocket] = set()
+handsets: dict[WebSocket, dict] = {}
 replay_task: asyncio.Task | None = None
+
+
+def _lan_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def _handset_summary() -> dict:
+    active_tx = [h.get("callsign") for h in handsets.values() if h.get("transmitting")]
+    return {
+        "count": len(handsets),
+        "transmitting": bool(active_tx),
+        "active_callsign": active_tx[0] if active_tx else None,
+    }
 
 
 class Report(BaseModel):
     text: str
     callsign: str | None = None   # used when the speaker does not say one
+    heading: float | None = None  # optional operator compass heading for dead-reckoning moves
 
 
 class NetLine(BaseModel):
@@ -109,11 +133,12 @@ def _clock(t: float | None) -> float | None:
 
 @app.post("/report")
 async def report(body: Report) -> dict:
-    return {"events": await publish(await tracker.ingest(body.text, body.callsign))}
+    return {"events": await publish(await tracker.ingest(body.text, body.callsign, heading=body.heading))}
 
 
 @app.post("/audio")
-async def audio(request: Request, callsign: str | None = None, lang: str | None = None) -> dict:
+async def audio(request: Request, callsign: str | None = None, lang: str | None = None,
+                heading: float | None = None) -> dict:
     """Body: a 16 kHz mono WAV clip from push-to-talk."""
     if stt.provider() is None:
         raise HTTPException(501, "no speech-to-text provider configured; the browser will fall back to its own")
@@ -124,7 +149,7 @@ async def audio(request: Request, callsign: str | None = None, lang: str | None 
         raise HTTPException(502, f"speech-to-text failed: {type(err).__name__}: {err}") from err
     if not heard["text"]:
         return {"transcript": "", "events": []}
-    events = await tracker.ingest(heard["text"], callsign, source="voice", stt=heard)
+    events = await tracker.ingest(heard["text"], callsign, source="voice", stt=heard, heading=heading)
     return {"transcript": heard["text"], "events": await publish(events)}
 
 
@@ -203,7 +228,8 @@ def state() -> dict:
     return {"centre": [gaz.proj.lon0, gaz.proj.lat0], "bbox": gaz.bbox, "places": len(gaz.places),
             "events": [tracker.public(e) for e in tracker.events], "custom_places": gaz.custom(),
             "transmissions": net.transmissions[-500:], "stt": stt.provider(), "stt_options": stt.available(),
-            "zone": zone.info(), "zones": [zone.info(z) for z in zone.available()]}
+            "zone": zone.info(), "zones": [zone.info(z) for z in zone.available()],
+            "offline": extractor.is_offline(), "handsets": _handset_summary()}
 
 
 class ZoneChoice(BaseModel):
@@ -222,6 +248,115 @@ async def zone_set(body: ZoneChoice) -> dict:
         raise HTTPException(400, str(err)) from err
     await broadcast({"type": "zone", "zone": zone.info()})
     return zone.info()
+
+
+@app.get("/offline-basemap.geojson")
+def offline_basemap() -> dict:
+    """Local pre-downloaded OSM streets, parks, and landmark footprints for 100% offline map rendering."""
+    return gaz.offline_basemap()
+
+
+class ModeChoice(BaseModel):
+    offline: bool
+
+
+@app.get("/mode")
+def mode_get() -> dict:
+    return {"offline": extractor.is_offline(), "stt": stt.provider()}
+
+
+@app.post("/mode")
+async def mode_set(body: ModeChoice) -> dict:
+    """Live switch between Hybrid AI (Gemini + OSM + ElevenLabs) and 100% Offline Ops (rules + local gazetteer)."""
+    extractor.set_offline(body.offline)
+    out = {"offline": extractor.is_offline(), "stt": stt.provider()}
+    await broadcast({"type": "mode", **out})
+    return out
+
+
+class PickCandidate(BaseModel):
+    index: int
+
+
+@app.post("/events/{event_id}/pick")
+async def pick_candidate(event_id: int, body: PickCandidate) -> dict:
+    """Operator resolves an ambiguous place ('which tower?') by selecting one of candidate_options."""
+    event = tracker.pick_candidate(event_id, body.index)
+    if event is None:
+        raise HTTPException(404, f"no event {event_id} or invalid candidate index {body.index}")
+    pub = tracker.public(event)
+    await broadcast({"type": "annotate", "id": event_id, "fields": pub})
+    return pub
+
+
+class EventEdit(BaseModel):
+    count: int | None = None
+    side: str | None = None
+    what: str | None = None
+    activity: str | None = None
+    heading: str | None = None
+
+
+@app.patch("/events/{event_id}")
+async def edit_event(event_id: int, body: EventEdit) -> dict:
+    """Operator factual correction (e.g., quantity 2 tanks -> 3 tanks, side unknown -> hostile)."""
+    event = tracker.edit_event(
+        event_id,
+        count=body.count,
+        side=body.side,
+        what=body.what,
+        activity=body.activity,
+        heading=body.heading,
+    )
+    if event is None:
+        raise HTTPException(404, f"no event {event_id}")
+    pub = tracker.public(event)
+    await broadcast({"type": "annotate", "id": event_id, "fields": pub})
+    return pub
+
+
+class MessageBatch(BaseModel):
+    text: str
+    channel: str = "auto"   # auto | whatsapp | email | chat
+    default_callsign: str | None = None
+    heading: float | None = None
+
+
+@app.post("/ingest/messages")
+async def ingest_messages(body: MessageBatch) -> dict:
+    """Extract and ingest one or more tactical reports from pasted WhatsApp chats or emails."""
+    if not body.text.strip():
+        raise HTTPException(400, "message text required")
+    channel, items = await msg_ingest.parse_messages(body.text, body.channel)
+    all_events = []
+    for item in items:
+        cs = item.get("callsign") or body.default_callsign
+        extra = {
+            "channel": channel,
+            "sender": item.get("sender"),
+            "timestamp_raw": item.get("timestamp_raw"),
+            "subject": item.get("subject"),
+        }
+        evs = await tracker.ingest(
+            item["text"],
+            default_callsign=cs,
+            source=channel,
+            extra={k: v for k, v in extra.items() if v},
+            heading=body.heading,
+        )
+        all_events.extend(await publish(evs))
+    return {"channel": channel, "parsed_count": len(items), "events": all_events}
+
+
+@app.get("/network-info")
+def network_info() -> dict:
+    ip = _lan_ip()
+    return {
+        "lan_ip": ip,
+        "https_handset_url": f"https://{ip}:8443/?handset=1",
+        "http_handset_url": f"http://{ip}:5173/?handset=1",
+        "handsets": _handset_summary(),
+    }
 
 
 class SttChoice(BaseModel):
@@ -318,6 +453,22 @@ async def ws_endpoint(ws: WebSocket) -> None:
     clients.add(ws)
     try:
         while True:
-            await ws.receive_text()
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            if msg.get("type") == "handset_hello":
+                handsets[ws] = {"callsign": msg.get("callsign") or "alpha 1", "transmitting": False}
+                await broadcast({"type": "handsets", **_handset_summary()})
+            elif msg.get("type") == "handset_ptt":
+                handsets[ws] = {
+                    "callsign": msg.get("callsign") or "alpha 1",
+                    "transmitting": bool(msg.get("active")),
+                }
+                await broadcast({"type": "handsets", **_handset_summary()})
     except WebSocketDisconnect:
         clients.discard(ws)
+        if ws in handsets:
+            handsets.pop(ws, None)
+            await broadcast({"type": "handsets", **_handset_summary()})
