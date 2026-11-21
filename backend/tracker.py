@@ -36,6 +36,9 @@ class Tracker:
         now = time.time() if now is None else now
         t0 = time.perf_counter()
         parsed = parsed or await extract(text)
+        named = bool(speaker or parsed["speaker"])
+        if not named and all(r["type"] == "other" for r in parsed["reports"]):
+            return []   # chatter ("hello hello"): no callsign, no place, no procedure. Nothing to log or plot.
         speaker = speaker or parsed["speaker"] or (norm(default_callsign) if default_callsign else None) or "unit 1"
         by_subject: dict[str, list[dict]] = {}
         for r in parsed["reports"]:
@@ -44,6 +47,7 @@ class Tracker:
         for subject, reports in by_subject.items():
             event = self._apply(subject, speaker, reports, text, now, replaces if subject == speaker else None)
             event.update(source=source, extractor=parsed.get("extractor"), transcript_meta=stt, **(extra or {}),
+                         callsign_assumed=not named and subject == speaker,
                          latency_ms={"stt": (stt or {}).get("stt_ms"), "extract": parsed.get("extract_ms"),
                                      "total": round((time.perf_counter() - t0) * 1000) + ((stt or {}).get("stt_ms") or 0)})
             self._write({"kind": "event", **event})

@@ -116,13 +116,16 @@ function speak(e) {
   window.speechSynthesis.speak(u)
 }
 
-async function send(body = text.value.trim()) {
+async function send(body = text.value.trim(), { voice = false } = {}) {
   if (!body) return
   text.value = ''
-  await fetch('/api/report', {
+  const r = await fetch('/api/report', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text: body, callsign: callsign.value }),
   })  // events come back over the WebSocket, same as for every other client
+  const out = await r.json().catch(() => ({}))
+  if (r.ok && !out.events?.length) heard.value = `heard “${body}”: ignored, no callsign or place`
+  else if (voice) heard.value = `heard: “${body}”`
 }
 
 async function reset() {
@@ -166,7 +169,9 @@ async function recordStop() {
     method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: wav })
   if (r.status === 501) { serverStt.value = null; heard.value = 'server speech-to-text off; using the browser'; return }
   const out = await r.json().catch(() => ({}))
-  heard.value = r.ok ? `heard: “${out.transcript}”` : `speech-to-text failed: ${out.detail || r.status}`
+  heard.value = !r.ok ? `speech-to-text failed: ${out.detail || r.status}`
+    : out.transcript && !out.events?.length ? `heard “${out.transcript}”: ignored, no callsign or place`
+    : `heard: “${out.transcript}”`
 }
 
 async function talk(start) {
@@ -176,14 +181,38 @@ async function talk(start) {
     try { start ? await recordStart() : await recordStop() } catch (err) { heard.value = `microphone: ${err.message}`; listening.value = false }
     return
   }
+  // Browser recogniser: one press = one transmission = one report. Chrome fires onresult many times while it refines
+  // its guess, so collect only final pieces while the button is held and send the whole thing once, on release.
   if (start) {
-    recogniser = new Speech()
-    recogniser.lang = lang.value === 'fr' ? 'fr-FR' : 'en-GB'
-    recogniser.onresult = (r) => { const t = r.results[0][0].transcript; heard.value = `heard: “${t}”`; send(t) }
-    recogniser.onend = () => { listening.value = false }
-    recogniser.start()
+    recogniser?.abort()                       // a late event from an earlier press must not send again
+    const rec = new Speech(), finals = []
+    let interim = '', sent = false
+    rec.lang = lang.value === 'fr' ? 'fr-FR' : 'en-GB'
+    rec.continuous = true                     // a pause mid-sentence must not end the transmission
+    rec.interimResults = true                 // live text only; never sent
+    rec.onresult = (r) => {
+      if (rec !== recogniser) return
+      interim = ''
+      for (let i = r.resultIndex; i < r.results.length; i++) {
+        if (r.results[i].isFinal) finals[i] = r.results[i][0].transcript.trim()
+        else interim += r.results[i][0].transcript
+      }
+      heard.value = `hearing: “${[...finals.filter(Boolean), interim.trim()].filter(Boolean).join(' ')}”`
+    }
+    rec.onend = () => {                       // fires once after stop(), with every final result delivered
+      if (rec !== recogniser || sent) return
+      sent = true
+      recogniser = null
+      const t = [...finals.filter(Boolean), interim.trim()].filter(Boolean).join(' ').trim()
+      if (t) send(t, { voice: true })
+      else heard.value = 'heard nothing'
+      listening.value = false
+    }
+    rec.onerror = (e) => { if (e.error !== 'aborted' && e.error !== 'no-speech') heard.value = `speech: ${e.error}` }
+    recogniser = rec
+    rec.start()
   } else {
-    recogniser?.stop()
+    recogniser?.stop()                        // onend sends the transmission
   }
 }
 
@@ -480,6 +509,7 @@ onUnmounted(() => {
           :class="{ bad: !e.ok && !['intent', 'order'].includes(e.type), amb: e.ambiguous, intent: ['intent', 'order'].includes(e.type), gone: e.superseded }">
           <div class="meta">
             <b :style="{ color: colour(e.callsign) }">{{ e.callsign }}</b>
+            <span v-if="e.callsign_assumed" class="assumed" title="No callsign was said; taken from the Default callsign box">(assumed)</span>
             <span v-if="e.speaker && e.speaker !== e.callsign">via {{ e.speaker }}</span>
             <time>{{ clock(e.t) }}</time>
             <span v-if="e.latency_ms">{{ e.latency_ms.total ?? e.latency_ms }} ms<template v-if="e.latency_ms.stt"> (speech {{ e.latency_ms.stt }})</template></span>
@@ -540,6 +570,7 @@ input.wide { font: inherit; width: 100%; box-sizing: border-box; padding: 6px 8p
 .read.gone { text-decoration: line-through; opacity: 0.6; }
 .tick { color: #047857; font-size: 12px; margin-left: 6px; }
 .query { color: #b45309; font-size: 12px; margin-left: 6px; }
+.assumed { color: #6b7280; font-size: 12px; font-style: italic; }
 .heard { font-size: 12px; color: #374151; background: #f3f4f6; padding: 4px 8px; border-radius: 6px; }
 .scrub { display: grid; gap: 4px; color: #6b7280; font-size: 12px; }
 aside > * { flex-shrink: 0; }
