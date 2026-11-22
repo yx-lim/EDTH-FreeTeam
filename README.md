@@ -265,7 +265,9 @@ What this repo can do now, grouped by area. Updated after each major implementat
 - Drone slang (ждун, мопед, пташка), counts ("два мавіки"), headings, "ще один" (= a new drone), and relayed reports.
 - The same thing seen twice is merged into one marker instead of two.
 - Units nearby are warned ("FPV at your position").
-- Markers fade by type: a drone after 3 min, vehicles and troops after 15 min.
+- Markers fade by type: a drone after 3 min, vehicles and troops after 15 min. The latest report (or the one clicked
+  in the log) still shows where it was last seen, dashed with its age, but no longer warns, counts or exports.
+- Reports are drawn even when basemap tiles fail or hang, and the map follows a picked place.
 - Static hazards (IEDs, mines, cables, drones waiting on the ground) never vanish: past their fresh window they stay
   dashed as "unconfirmed, N h old".
 - A moving contact shows an arrow for its heading.

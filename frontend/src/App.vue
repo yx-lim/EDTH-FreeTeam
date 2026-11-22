@@ -337,6 +337,19 @@ const contactDoubt = (e) =>
   e.expired ||
   (live.value && now.value - e.t > contactTtl(e.contact) / 2)
 
+// The report in the Latest Report card (or the one clicked in the log) must be findable on the map. Once it has
+// timed out it is drawn, dashed and with its age, where it was last seen. It is not a live contact: no warnings,
+// no count, no export, no projected flight.
+const lastSeenContact = computed(() => {
+  if (!live.value) return null
+  const id = (previewedEvent.value || visible.value.at(-1))?.id
+  const e = visible.value.find((x) => x.id === id)
+  if (!e || !isContact(e) || !e.ok || !e.centre || e.superseded || e.cleared || !isPlottableOnMap(e)) return null
+  if (persistent(e.contact) || now.value - e.t <= contactTtl(e.contact)) return null // the live picture has it
+  if (visible.value.findLast((x) => x.callsign === e.callsign && x.ok && !x.superseded)?.id !== e.id) return null // seen again since
+  return { ...e, expired: true }
+})
+
 const WARN_M = 300
 const metres = ([lon1, lat1], [lon2, lat2]) =>
   Math.hypot((lon2 - lon1) * 111320 * Math.cos((lat1 * Math.PI) / 180), (lat2 - lat1) * 110540)
@@ -992,6 +1005,7 @@ function render() {
 
   const seen = showContacts.value ? contactsOnMap.value : []
   const groundSeen = seen.filter((e) => !isAirborneContact(e.contact))
+  if (showContacts.value && lastSeenContact.value) groundSeen.push(lastSeenContact.value)
   map.getSource('contact-regions').setData({
     type: 'FeatureCollection',
     features: groundSeen.map((e) => ({
@@ -1689,8 +1703,11 @@ function connect() {
     if (msg.type === 'annotate') {
       const e = events.value.find((x) => x.id === msg.id)
       if (e) {
+        const was = String(e.centre)
         Object.assign(e, msg.fields)
         events.value = [...events.value]
+        // A picked place can be kilometres from the first guess: follow it, on every screen.
+        if (e.ok && e.centre && String(e.centre) !== was && isPlottableOnMap(e)) focusCoords(e.centre)
       }
     }
     if (msg.type === 'reset') {
@@ -1758,7 +1775,8 @@ onMounted(async () => {
   map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-left')
   map.on('styleimagemissing', addSymbolImage)
 
-  map.on('load', () => {
+  // 'style.load', not 'load': 'load' waits for basemap tiles, so on a bad link no report was ever drawn.
+  map.once('style.load', () => {
     const empty = { type: 'FeatureCollection', features: [] }
     for (const id of [
       'offline-vec',
@@ -2015,6 +2033,9 @@ onMounted(async () => {
     })
 
     applyBasemap()
+    // Open on the latest report, which can be well outside the zone (the Eiffel Tower is 3 km from the Paris centre).
+    const latest = visible.value.at(-1)
+    if (latest?.ok && latest.centre && !latest.superseded && isPlottableOnMap(latest)) map.jumpTo({ center: latest.centre })
     updateGrid()
     render()
 
