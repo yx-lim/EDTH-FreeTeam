@@ -19,6 +19,7 @@ import {
   MessageSquare,
   Mic,
   Minus,
+  PanelRightClose,
   Pencil,
   Plus,
   Radio,
@@ -127,6 +128,7 @@ const emit = defineEmits([
   'remove-overlay',
   'submit-medevac',
   'submit-salute',
+  'collapse-sidebar',
 ])
 
 const textInput = ref('')
@@ -403,6 +405,16 @@ function onFileChange(ev) {
         >
           <ShieldAlert :size="14" />
           <span>{{ hasSos ? 'CLEAR SOS' : sosArmed ? 'CONFIRM?' : 'SOS' }}</span>
+        </button>
+
+        <button
+          type="button"
+          class="sidebar-collapse-btn"
+          title="Collapse sidebar (⌘\)"
+          aria-label="Collapse right sidebar"
+          @click="emit('collapse-sidebar')"
+        >
+          <PanelRightClose :size="15" />
         </button>
       </div>
     </section>
