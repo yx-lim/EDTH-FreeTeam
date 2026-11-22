@@ -78,6 +78,7 @@ onMounted(() => {
           <span v-else-if="handsets.count > 0">
             {{ handsets.count }} PHONE HANDSET{{ handsets.count > 1 ? 'S' : '' }} LINKED TO C2
           </span>
+          <span v-else-if="info?.cloud">READY — SCAN QR CODE FROM ANY SMARTPHONE</span>
           <span v-else>WAITING FOR PHONE HANDSET ON SAME WI-FI ({{ info?.lan_ip || 'LAN' }})</span>
         </div>
 
@@ -88,7 +89,7 @@ onMounted(() => {
           </div>
 
           <div class="qr-instructions">
-            <div class="mode-switch" style="align-self: flex-start">
+            <div v-if="!info?.cloud" class="mode-switch" style="align-self: flex-start">
               <button type="button" :class="{ 'is-active': !useHttp }" @click="useHttp = false">
                 HTTPS (LIVE MIC)
               </button>
@@ -97,7 +98,12 @@ onMounted(() => {
               </button>
             </div>
 
-            <ol class="phone-steps">
+            <ol v-if="info?.cloud" class="phone-steps">
+              <li>Scan the QR code with any iPhone or Android camera (works over Wi-Fi or 4G/5G).</li>
+              <li>Allow microphone permission when prompted (trusted HTTPS — no cert warning).</li>
+              <li>Hold <strong>PUSH TO TALK</strong> on your phone — reports stream live onto this C2 map!</li>
+            </ol>
+            <ol v-else class="phone-steps">
               <li>Connect your phone to the <strong>same Wi-Fi</strong> as this laptop.</li>
               <li>Scan the QR code with your iPhone or Android camera.</li>
               <li v-if="!useHttp">
@@ -117,7 +123,9 @@ onMounted(() => {
             </div>
 
             <div class="wifi-note mono">
-              <Wifi :size="12" /> LAN IP: {{ info?.lan_ip || 'detecting…' }} · HTTPS Bridge :8443
+              <Wifi :size="12" />
+              <template v-if="info?.cloud">TRUSTED CLOUD HTTPS · {{ info.lan_ip }}</template>
+              <template v-else>LAN IP: {{ info?.lan_ip || 'detecting…' }} · HTTPS Bridge :8443</template>
             </div>
           </div>
         </div>

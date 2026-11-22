@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 load_dotenv()
@@ -24,10 +26,31 @@ from .geo import Gazetteer  # noqa: E402
 from .net import Net  # noqa: E402
 from .tracker import Tracker  # noqa: E402
 
-DATA = Path(__file__).resolve().parent.parent / "data"
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / "data"
 LOG = DATA / "events.jsonl"
+FRONTEND_DIST = ROOT / "frontend" / "dist"
 
 app = FastAPI(title="Voice-to-Map")
+
+
+class _StripApiPrefixMiddleware:
+    """In single-container production (Render), rewrite /api/* -> /* for both HTTP and WebSocket routes."""
+
+    def __init__(self, asgi_app):
+        self.app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            path = scope.get("path", "")
+            if path == "/api" or path.startswith("/api/"):
+                new_path = path[4:] or "/"
+                scope = dict(scope, path=new_path)
+                if "raw_path" in scope and isinstance(scope["raw_path"], (bytes, bytearray)):
+                    raw = bytes(scope["raw_path"])
+                    if raw == b"/api" or raw.startswith(b"/api/"):
+                        scope["raw_path"] = raw[4:] or b"/"
+        await self.app(scope, receive, send)
 
 
 @app.on_event("startup")
@@ -36,6 +59,12 @@ async def _warm_speech_to_text() -> None:
 
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(_StripApiPrefixMiddleware)
+
+
+@app.get("/healthz")
+def healthz() -> dict:
+    return {"ok": True}
 
 gaz = Gazetteer()
 tracker = Tracker(gaz, log=LOG)   # replays data/events.jsonl, so a restart keeps the picture
@@ -356,12 +385,27 @@ async def ingest_messages(body: MessageBatch) -> dict:
 
 
 @app.get("/network-info")
-def network_info() -> dict:
+def network_info(request: Request) -> dict:
+    ext = (os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    host_only = host.split(":", 1)[0].lower()
+    is_local = (not host_only) or host_only in ("localhost", "127.0.0.1", "0.0.0.0", "testserver") or host_only.startswith(("192.168.", "10.", "172."))
+    if ext or not is_local:
+        proto = request.headers.get("x-forwarded-proto") or ("https" if ext.startswith("https") else request.url.scheme)
+        base = ext or f"{proto}://{host}"
+        return {
+            "lan_ip": host_only or ext.replace("https://", "").replace("http://", ""),
+            "https_handset_url": f"{base}/?handset=1",
+            "http_handset_url": f"{base}/?handset=1",
+            "cloud": True,
+            "handsets": _handset_summary(),
+        }
     ip = _lan_ip()
     return {
         "lan_ip": ip,
         "https_handset_url": f"https://{ip}:8443/?handset=1",
         "http_handset_url": f"http://{ip}:5173/?handset=1",
+        "cloud": False,
         "handsets": _handset_summary(),
     }
 
@@ -479,3 +523,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
         if ws in handsets:
             handsets.pop(ws, None)
             await broadcast({"type": "handsets", **_handset_summary()})
+
+
+# Serve built Vue frontend in single-container production (Render / Docker) after all API routes are registered
+if (FRONTEND_DIST / "index.html").exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
