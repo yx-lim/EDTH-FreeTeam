@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import maplibregl from 'maplibre-gl'
 import ms from 'milsymbol'
 import {
@@ -9,8 +9,11 @@ import {
   Layers,
   LocateFixed,
   Navigation,
+  PanelRightClose,
+  PanelRightOpen,
   Radar,
   Target,
+  Terminal,
   X,
 } from 'lucide-vue-next'
 import { createVad } from './vad.js'
@@ -21,6 +24,7 @@ import {
   circleCoords,
   createOverlayCanvasImage,
   formatDistance,
+  formatZuluTime,
   fovConeGeoJson,
   haversineMeters,
   headingToCardinal,
@@ -209,8 +213,19 @@ const showLegend = ref(false)
 const nvgMode = ref(!!saved.nvgMode)
 const redNight = ref(!!saved.night)
 const confirmGate = ref(!!saved.confirmGate)
+const sidebarOpen = ref(saved.sidebarOpen ?? true)
+const showMapHud = ref(saved.showMapHud ?? !sidebarOpen.value)
 
-watch([basemap, showGrid, showRings, showFov, showContacts, nvgMode, redNight, confirmGate], () => {
+function toggleSidebar(force) {
+  const next = typeof force === 'boolean' ? force : !sidebarOpen.value
+  sidebarOpen.value = next
+  // Auto-show the transparent game-style overlay when collapsing; hide duplication when expanding
+  showMapHud.value = !next
+  nextTick(() => map?.resize())
+  window.setTimeout(() => map?.resize(), 230)
+}
+
+watch([basemap, showGrid, showRings, showFov, showContacts, nvgMode, redNight, confirmGate, sidebarOpen, showMapHud], () => {
   try {
     localStorage.setItem(
       'mapLook',
@@ -223,6 +238,8 @@ watch([basemap, showGrid, showRings, showFov, showContacts, nvgMode, redNight, c
         nvgMode: nvgMode.value,
         night: redNight.value,
         confirmGate: confirmGate.value,
+        sidebarOpen: sidebarOpen.value,
+        showMapHud: showMapHud.value,
       }),
     )
   } catch {}
@@ -432,6 +449,54 @@ const draftWhy = (e) => {
 }
 
 const currentReplayTime = computed(() => (cursor.value > 0 ? visible.value.at(-1)?.t ?? null : null))
+
+// Game-Style Transparent Top-Right Map HUD Feed & Live Process Line
+const hudProcessInfo = computed(() => {
+  if (listening.value) return { state: 'tx', text: 'TX LIVE · LISTENING [RELEASE SPACE TO SEND]' }
+  if (handsets.value.transmitting) return { state: 'tx', text: `PHONE TX LIVE · ${(handsets.value.active_callsign || 'HANDSET').toUpperCase()}` }
+  if (txStage.value === 'TRANSCRIBING' || txStage.value === 'PROCESSING') {
+    const engine = offlineMode.value ? 'MLX WHISPER + OLLAMA' : (sttDisplayLabel.value || 'AI').toUpperCase()
+    return { state: 'busy', text: `${txStage.value} (${engine})…` }
+  }
+  if (msgBusy.value) return { state: 'busy', text: 'EXTRACTING WHATSAPP / EMAIL INTEL…' }
+  if (demoBusy.value) return { state: 'busy', text: 'RUNNING TACTICAL DEMO SEQUENCE…' }
+  if (netOn.value) return { state: 'busy', text: `RADIO NET LIVE · ${netSegments.value} SEGMENTS` }
+  const modeTag = offlineMode.value ? 'OFFLINE OPS · MLX + OLLAMA' : 'HYBRID AI'
+  const gateTag = confirmGate.value ? `GATE ON (${drafts.value.length} HELD)` : 'AUTO-PLOT'
+  return { state: 'idle', text: `${modeTag} · ${gateTag} · HOLD [SPACE] TO TALK` }
+})
+
+const gameHudFeed = computed(() => {
+  return [...visible.value]
+    .filter((e) => !e.superseded && !e.rejected)
+    .reverse()
+    .slice(0, 6)
+    .map((e, idx) => {
+      const isC = isContact(e)
+      const title = isC
+        ? describeContact(e.contact).toUpperCase()
+        : `${formatCallsignTitle(e.callsign).toUpperCase()} · ${(e.type || 'POS').toUpperCase()}`
+      const speedTag =
+        isC && e.contact?.speed_mps != null
+          ? `${Math.round(e.contact.speed_mps * 3.6)} km/h ${(e.contact.heading || '').toUpperCase()}`.trim()
+          : ''
+      return {
+        raw: e,
+        id: e.id,
+        time: formatZuluTime(e.t),
+        title,
+        speedTag,
+        colour: isC ? sideOf(e.contact).colour : colour(e.callsign),
+        place: e.anchor ? String(e.anchor).split(',')[0].trim() : e.ok ? '' : 'NO FIX',
+        mgrs: e.centre ? e.mgrs || mgrsAt(e.centre, { radius: e.radius_m }) : '',
+        confirmed: !!e.confirmed,
+        pending: confirmGate.value && e.ok && !e.confirmed,
+        candidates: (e.candidate_options || []).length > 1 ? e.candidate_options : [],
+        sub: idx < 2 ? e.parsed?.summary_en || (e.text ? `“${e.text}”` : '') : '',
+        opacity: Math.max(0.58, 1 - idx * 0.085),
+      }
+    })
+})
 
 // --- API Actions -----------------------------------------------------------------------------------------------
 async function chooseStt(name) {
@@ -1546,6 +1611,11 @@ function keydown(e) {
       return
     }
   }
+  if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
+    e.preventDefault()
+    toggleSidebar()
+    return
+  }
   if (activeTab.value === 'net' && netOn.value) return
   if (e.code === 'Space' && !e.repeat && !typing(e)) {
     e.preventDefault()
@@ -2112,7 +2182,7 @@ onUnmounted(() => {
       <button type="button" @click="appAlert = ''">DISMISS</button>
     </div>
 
-    <section class="workspace">
+    <section class="workspace" :class="{ 'is-sidebar-collapsed': !sidebarOpen }">
       <div class="map-column">
         <div class="map-stage" :class="{ 'is-drop-armed': !!armedDrop.kind }">
           <div id="map"></div>
@@ -2139,20 +2209,109 @@ onUnmounted(() => {
             </button>
           </div>
 
-          <!-- Top-Right 5-Layer Base Map Switcher (incl. 100% OFFLINE vector map!) -->
-          <div class="map-hud-topright" role="group" aria-label="Base map layer switcher">
-            <span class="map-layer-icon"><Layers :size="13" /></span>
+          <!-- Top-Right Map Bar: Basemap Switcher + Game HUD Toggle + Claude-Style Sidebar Toggle -->
+          <div class="map-hud-topright-wrap">
+            <div class="map-hud-topright" role="group" aria-label="Base map layer switcher">
+              <span class="map-layer-icon"><Layers :size="13" /></span>
+              <button
+                v-for="(b, id) in ALL_BASEMAPS"
+                :key="id"
+                type="button"
+                class="layer-btn"
+                :class="{ 'is-active': basemap === id }"
+                :aria-pressed="basemap === id"
+                @click="basemap = id"
+              >
+                {{ b.label }}
+              </button>
+            </div>
+
             <button
-              v-for="(b, id) in ALL_BASEMAPS"
-              :key="id"
               type="button"
-              class="layer-btn"
-              :class="{ 'is-active': basemap === id }"
-              :aria-pressed="basemap === id"
-              @click="basemap = id"
+              class="map-rail-btn"
+              :class="{ 'is-active': showMapHud }"
+              title="Toggle transparent game-style command & process text overlay on map"
+              @click="showMapHud = !showMapHud"
             >
-              {{ b.label }}
+              <Terminal :size="13" />
+              <span>HUD</span>
             </button>
+
+            <button
+              v-if="!sidebarOpen"
+              type="button"
+              class="map-rail-btn is-sidebar-btn"
+              title="Expand right sidebar (⌘\)"
+              aria-label="Expand right sidebar"
+              @click="toggleSidebar(true)"
+            >
+              <PanelRightOpen :size="15" />
+              <span v-if="drafts.length" class="rail-badge-dot">{{ drafts.length }}</span>
+            </button>
+          </div>
+
+          <!-- Game-Style Transparent Top-Right Overlay (NO background box — pure floating tactical text!) -->
+          <div v-if="showMapHud" class="map-game-hud" aria-live="polite">
+            <div class="game-hud-proc" :class="`is-${hudProcessInfo.state}`">
+              <span class="game-hud-dot"></span>
+              <span>{{ hudProcessInfo.text }}</span>
+            </div>
+
+            <div v-if="heard && (listening || txStage !== 'STANDBY')" class="game-hud-heard">
+              {{ heard }}
+            </div>
+
+            <div v-if="gameHudFeed.length" class="game-hud-feed">
+              <div
+                v-for="item in gameHudFeed"
+                :key="item.id"
+                class="game-hud-item"
+                :style="{ opacity: item.opacity }"
+                @click="item.raw.centre && focusCoords(item.raw.centre)"
+              >
+                <div class="game-hud-line">
+                  <span class="game-hud-status" :class="item.confirmed ? 'is-ok' : 'is-wait'">
+                    {{ item.confirmed ? '✓' : '⏳' }}
+                  </span>
+                  <span class="game-hud-title" :style="{ color: item.colour }">
+                    {{ item.title }}<template v-if="item.speedTag"> · {{ item.speedTag }}</template>
+                  </span>
+                  <span v-if="item.place" class="game-hud-place">· {{ item.place }}</span>
+                  <span v-if="item.mgrs" class="game-hud-mgrs">{{ item.mgrs }}</span>
+                  <span class="game-hud-time">{{ item.time }}</span>
+                </div>
+
+                <div v-if="item.sub" class="game-hud-sub">↳ {{ item.sub }}</div>
+
+                <div v-if="item.pending || item.candidates.length" class="game-hud-actions" @click.stop>
+                  <button
+                    v-for="cand in item.candidates.slice(0, 4)"
+                    :key="cand.index"
+                    type="button"
+                    class="game-hud-act is-cand"
+                    @click="pickCandidate(item.id, cand.index)"
+                  >
+                    [?{{ cand.index + 1 }} {{ cand.name }}]
+                  </button>
+                  <button
+                    v-if="item.pending"
+                    type="button"
+                    class="game-hud-act is-confirm"
+                    @click="confirmEvent(item.raw)"
+                  >
+                    [✓ CONFIRM]
+                  </button>
+                  <button
+                    v-if="item.pending"
+                    type="button"
+                    class="game-hud-act is-reject"
+                    @click="rejectEvent(item.raw)"
+                  >
+                    [✕ REJECT]
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- Collapsible NATO APP-6 Legend Popover -->
@@ -2286,6 +2445,7 @@ onUnmounted(() => {
         @remove-overlay="removeOverlay"
         @submit-medevac="handleSubmitMedevac"
         @submit-salute="handleSubmitSalute"
+        @collapse-sidebar="toggleSidebar(false)"
       />
     </section>
 
