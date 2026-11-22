@@ -186,7 +186,7 @@ onUnmounted(() => {
         <span class="conn-dot"></span>
         <div class="conn-text">
           <strong>{{ connected ? 'LIVE LINK' : 'OFFLINE' }}</strong>
-          <small>{{ connected ? (offlineMode ? 'LOCAL RULES' : (sttLabel || 'BROWSER').toUpperCase()) : statusText.toUpperCase() }}</small>
+          <small>{{ connected ? (offlineMode ? 'MLX + OLLAMA' : (sttLabel || 'BROWSER').toUpperCase()) : statusText.toUpperCase() }}</small>
         </div>
       </div>
     </div>

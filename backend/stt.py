@@ -33,7 +33,27 @@ GEMINI_STT_MODEL = os.getenv("GEMINI_STT_MODEL") or os.getenv("GEMINI_MODEL", "g
 LANGUAGES = {"en": "English", "fr": "French", "uk": "Ukrainian", "ru": "Russian"}
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
+MLX_WHISPER_MODEL = os.getenv("MLX_WHISPER_MODEL", "mlx-community/whisper-large-v3-turbo-q4")
+_mlx_local_path: str | None = None
 _whisper = None
+
+
+def _resolve_mlx_model_path() -> str:
+    """Resolve the local cached HuggingFace snapshot directory once so MLX Whisper makes ZERO network calls offline."""
+    global _mlx_local_path
+    if _mlx_local_path:
+        return _mlx_local_path
+    from pathlib import Path
+    repo = MLX_WHISPER_MODEL
+    if Path(repo).exists():
+        _mlx_local_path = repo
+        return repo
+    slug = "models--" + repo.replace("/", "--")
+    snaps = sorted(Path.home().glob(f".cache/huggingface/hub/{slug}/snapshots/*"))
+    if snaps:
+        _mlx_local_path = str(snaps[-1])
+        return _mlx_local_path
+    return repo
 # Whisper's initial_prompt sets the expected language and style as much as the words: a Ukrainian prompt keeps
 # Ukrainian in Cyrillic instead of transliterating or translating it.
 PROMPTS = {"en": "Radio position report. Places: ", "fr": "Compte rendu radio de position. Lieux : ",
@@ -87,12 +107,15 @@ def warm() -> None:
         _whisper_thread.submit(_load_whisper)
 
 
-_chosen: str | None = None   # set from the app at run time; overrides STT_PROVIDER until restart
-KEYS = {"elevenlabs": "ELEVENLABS_API_KEY", "gemini": "GEMINI_API_KEY", "mistral": "MISTRAL_API_KEY"}
-LABELS = {"elevenlabs": "ElevenLabs", "gemini": "Gemini", "mistral": "Mistral Voxtral", "whisper": "Whisper (local)"}
+def _mlx_installed() -> bool:
+    try:
+        import mlx_whisper  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
-def _whisper_installed() -> bool:
+def _faster_whisper_installed() -> bool:
     try:
         import faster_whisper  # noqa: F401
         return True
@@ -100,8 +123,27 @@ def _whisper_installed() -> bool:
         return False
 
 
+def _whisper_installed() -> bool:
+    return _mlx_installed() or _faster_whisper_installed()
+
+
+def _is_offline_mode() -> bool:
+    from . import extract as _extract
+    return bool(getattr(_extract, "_offline_mode", False))
+
+
+_chosen: str | None = None   # set from the app at run time; overrides STT_PROVIDER until restart
+KEYS = {"elevenlabs": "ELEVENLABS_API_KEY", "gemini": "GEMINI_API_KEY", "mistral": "MISTRAL_API_KEY"}
+LABELS = {
+    "elevenlabs": "ElevenLabs",
+    "gemini": "Gemini",
+    "mistral": "Mistral Voxtral",
+    "whisper": "MLX Whisper (Local)" if _mlx_installed() else "Whisper (local)",
+}
+
+
 def available() -> list[str]:
-    """Providers that can run now: cloud ones with a key, Whisper when installed."""
+    """Providers that can run now: cloud ones with a key, local Whisper (MLX / faster-whisper) when installed."""
     out = [name for name, key in KEYS.items() if os.getenv(key)]
     return out + (["whisper"] if _whisper_installed() else [])
 
@@ -112,12 +154,14 @@ def choose(name: str) -> str | None:
     if name != "none" and name not in available():
         raise ValueError(f"{name} is not available: add its key to .env or install it")
     _chosen = name
-    if name == "whisper":
-        _whisper_thread.submit(_load_whisper)   # load now, so the next press does not wait for the model
+    if name == "whisper" and not _mlx_installed():
+        _whisper_thread.submit(_load_whisper)   # preload faster-whisper CPU model
     return provider()
 
 
 def provider() -> str | None:
+    if _is_offline_mode():
+        return "whisper" if _whisper_installed() else None
     chosen = _chosen or os.getenv("STT_PROVIDER")
     if chosen:
         return None if chosen == "none" else chosen
@@ -131,15 +175,24 @@ def provider() -> str | None:
 async def transcribe(audio: bytes, vocabulary: list[str], language: str | None = None) -> dict:
     name = provider()
     if name is None:
-        raise RuntimeError("no speech-to-text provider: set ELEVENLABS_API_KEY or MISTRAL_API_KEY, or install faster-whisper")
+        raise RuntimeError("no speech-to-text provider: set ELEVENLABS_API_KEY or MISTRAL_API_KEY, or install mlx-whisper/faster-whisper")
     language = None if language in (None, "", "auto") else language
     if language in ("uk", "ru"):   # callsigns, procedure words and drone slang first: they are what gets misheard
         from . import lang_uk
         vocabulary = list(dict.fromkeys(lang_uk.vocabulary() + vocabulary))
     t0 = time.perf_counter()
     run = {"elevenlabs": _elevenlabs, "gemini": _gemini, "mistral": _mistral}.get(name, _local)
-    text = await run(audio, vocabulary, language)
-    return {"text": text.strip(), "provider": name, "stt_ms": round((time.perf_counter() - t0) * 1000)}
+    used_provider = "mlx-whisper" if (name == "whisper" and _mlx_installed()) else name
+    try:
+        text = await run(audio, vocabulary, language)
+    except (httpx.HTTPError, OSError):
+        # Automatic offline failover: if cloud STT fails due to internet loss, run local MLX Whisper seamlessly!
+        if name != "whisper" and _whisper_installed():
+            text = await _local(audio, vocabulary, language)
+            used_provider = "mlx-whisper (offline fallback)" if _mlx_installed() else "whisper (offline fallback)"
+        else:
+            raise
+    return {"text": text.strip(), "provider": used_provider, "stt_ms": round((time.perf_counter() - t0) * 1000)}
 
 
 async def _mistral(audio: bytes, vocabulary: list[str], language: str | None) -> str:
@@ -182,8 +235,30 @@ async def _gemini(audio: bytes, vocabulary: list[str], language: str | None) -> 
 
 async def _local(audio: bytes, vocabulary: list[str], language: str | None) -> str:
     def run() -> str:
+        prompt = _prompt(language, vocabulary) + ", ".join(vocabulary[:40])
+        if _mlx_installed():
+            import mlx_whisper
+            import numpy as np
+            pcm = _pcm(audio)
+            if isinstance(pcm, np.ndarray) and (pcm.size < 1600 or float(np.sqrt(np.mean(pcm ** 2))) < 0.0025):
+                return ""   # silence guard prevents Whisper "Thank you." hallucinations on empty clicks
+            kwargs: dict = {
+                "path_or_hf_repo": _resolve_mlx_model_path(),
+                "initial_prompt": prompt,
+                "condition_on_previous_text": False,
+                "no_speech_threshold": 0.6,
+            }
+            if language:
+                kwargs["language"] = language
+            result = mlx_whisper.transcribe(pcm, **kwargs)
+            try:
+                import mlx.core as mx
+                mx.clear_cache()
+            except Exception:
+                pass
+            return str(result.get("text") or "")
         segments, _ = _load_whisper().transcribe(_pcm(audio), language=language, vad_filter=True,
-                                          initial_prompt=_prompt(language, vocabulary) + ", ".join(vocabulary[:40]))
+                                                 initial_prompt=prompt)
         return " ".join(s.text for s in segments)
 
     return await asyncio.get_running_loop().run_in_executor(_whisper_thread, run)

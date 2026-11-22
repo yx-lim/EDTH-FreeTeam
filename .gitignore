@@ -19,3 +19,4 @@ data/zones/*/net.jsonl
 data/zones/*/custom_places.json
 .local_certs/
 .claude/settings.local.json
+data/offline_tiles/

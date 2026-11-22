@@ -15,6 +15,7 @@ import json
 import math
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -34,6 +35,76 @@ USER_AGENT = "edth-voice-to-map-geo-agent/1.0 (tactical-c2-hackathon)"
 # Paris metropolitan viewbox (west, north, east, south) for local biasing before global fallback
 PARIS_VIEWBOX = "2.22,48.91,2.47,48.81"
 _MGRS_CONV = mgrs_lib.MGRS()
+
+# Pre-bundled offline Paris & surrounding landmark table (EN/FR/UK/RU) for zero-internet resolution
+_OFFLINE_LANDMARKS_FILE = Path(__file__).resolve().parent.parent / "data" / "offline_landmarks.json"
+_OFFLINE_LANDMARKS: list[dict[str, Any]] = []
+_OFFLINE_INDEX: dict[str, dict[str, Any]] = {}
+
+
+def _load_offline_landmarks() -> None:
+    if _OFFLINE_LANDMARKS or not _OFFLINE_LANDMARKS_FILE.exists():
+        return
+    try:
+        raw = json.loads(_OFFLINE_LANDMARKS_FILE.read_text(encoding="utf-8"))
+        for lm in raw.get("landmarks") or []:
+            _OFFLINE_LANDMARKS.append(lm)
+            for key in [lm.get("name", ""), *(lm.get("aliases") or [])]:
+                k = norm(key)
+                if k:
+                    _OFFLINE_INDEX[k] = lm
+    except Exception:
+        pass
+
+
+def offline_landmark_lookup(spoken_name: str | None) -> dict[str, Any] | None:
+    """Resolve iconic wider-Paris landmarks (Eiffel Tower, Notre-Dame, Panthéon, Louvre, etc.) with ZERO internet."""
+    _load_offline_landmarks()
+    if not spoken_name:
+        return None
+    k = norm(spoken_name)
+    if k in _OFFLINE_INDEX:
+        return _OFFLINE_INDEX[k]
+    # Strip trailing/leading noise words ("the", "paris", "near", "cathedral") and check exact alias match
+    cleaned = " ".join(w for w in k.split() if w not in ("the", "le", "la", "les", "de", "du", "paris", "france"))
+    if cleaned and cleaned in _OFFLINE_INDEX:
+        return _OFFLINE_INDEX[cleaned]
+    for alias_key, lm in _OFFLINE_INDEX.items():
+        if len(alias_key) >= 5 and (alias_key in k or (cleaned and cleaned in alias_key and len(cleaned) >= 5)):
+            return lm
+    return None
+
+
+def resolve_offline_landmark(
+    report: dict[str, Any],
+    gaz: Gazetteer,
+    last: BaseGeometry | None = None,
+    heading_deg: float | None = None,
+) -> dict[str, Any] | None:
+    """Compute exact Shapely offset + MGRS around a curated offline Paris landmark without any network call."""
+    if not getattr(_extract, "_offline_mode", False) and not enabled():
+        return None
+    anchor_obj = report.get("anchor") or {}
+    if anchor_obj.get("kind") in ("grid", "unit"):
+        return None
+    spoken = anchor_obj.get("name") or ""
+    lm = offline_landmark_lookup(spoken)
+    if not lm:
+        return None
+    last_ll_pt = gaz.proj.to_ll(last.centroid) if last is not None else None
+    last_lonlat = (last_ll_pt.x, last_ll_pt.y) if last_ll_pt is not None else None
+    relation = report.get("relation") or "at"
+    distance_m = report.get("distance_m")
+    bearing_deg = report.get("bearing_deg")
+    lat, lon = float(lm["lat"]), float(lm["lon"])
+    rad = float(lm.get("radius_m") or 45.0)
+    local_proj = Proj(lat, lon)
+    footprint_ll = mapping(local_proj.to_ll(Point(0, 0).buffer(rad)))
+    note = f"Offline Paris Landmark Cache → {lm['name']}"
+    return _apply_offset_around_world_place(
+        lat, lon, footprint_ll, lm["name"], relation, distance_m, bearing_deg,
+        last_lonlat, heading_deg, gaz, note=note, ambiguous=False,
+    )
 
 _nominatim_cache: dict[str, list[dict[str, Any]]] = {}
 _nominatim_lock = asyncio.Lock()
@@ -404,11 +475,17 @@ async def enrich_ambiguous_candidates(
     if spoken not in ("tower", "the tower", "tour", "la tour", "вежа", "башня", "башта"):
         return res
     names = {c["name"].lower() for c in res["candidate_options"]}
-    if not any("eiffel" in n for n in names) and enabled():
-        items = await _nominatim_search("Tour Eiffel, Paris, France", bounded_paris=True)
-        if items:
-            el = items[0]
-            elat, elon = float(el["lat"]), float(el["lon"])
+    if not any("eiffel" in n for n in names):
+        elat = elon = None
+        if enabled():
+            items = await _nominatim_search("Tour Eiffel, Paris, France", bounded_paris=True)
+            if items:
+                elat, elon = float(items[0]["lat"]), float(items[0]["lon"])
+        if elat is None:
+            lm = offline_landmark_lookup("eiffel tower")
+            if lm:
+                elat, elon = float(lm["lat"]), float(lm["lon"])
+        if elat is not None and elon is not None:
             ref_ll = gaz.proj.to_ll(last.centroid) if last is not None else gaz.proj.to_ll(Point(0, 0))
             eiffel_proj = Proj(elat, elon)
             eiffel_reg = eiffel_proj.to_ll(Point(0, 0).buffer(65))

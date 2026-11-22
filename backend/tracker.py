@@ -108,6 +108,14 @@ class Tracker:
                 ai_res = await geo_agent.resolve_with_ai(text, report, self.gaz, last=rep_last, units=units, heading_deg=heading)
                 if ai_res and ai_res.get("ok"):
                     result = ai_res
+            if not result.get("ok") or (
+                not geo_agent.enabled()
+                and geo_agent.offline_landmark_lookup((report.get("anchor") or {}).get("name"))
+                and "sounds alike" in (result.get("note") or "").lower()
+            ):
+                off_res = geo_agent.resolve_offline_landmark(report, self.gaz, last=rep_last, heading_deg=heading)
+                if off_res and off_res.get("ok"):
+                    result = off_res
             result = await geo_agent.enrich_ambiguous_candidates(report, result, self.gaz, last=rep_last)
         geom = result.get("_geom")
         event.update({k: v for k, v in result.items() if k != "_geom"})
@@ -204,8 +212,9 @@ class Tracker:
         what: str | None = None,
         activity: str | None = None,
         heading: str | None = None,
+        speed_mps: float | None = None,
     ) -> dict | None:
-        """Operator factual correction (e.g., 2 tanks -> 3 tanks, unknown -> hostile) reflected live on the map."""
+        """Operator factual correction (e.g., 2 tanks -> 3 tanks, unknown -> hostile, UAV speed) reflected live on the map."""
         event = self.get(event_id)
         if event is None:
             return None
@@ -225,6 +234,12 @@ class Tracker:
                 c["activity"] = activity or None
             if heading is not None:
                 c["heading"] = heading or None
+            if speed_mps is not None:
+                c["speed_mps"] = round(max(0.0, min(900.0, float(speed_mps))), 2)
+                if c["speed_mps"] > 0 and not c.get("activity"):
+                    c["activity"] = "moving"
+                elif c["speed_mps"] == 0:
+                    c["activity"] = "static"
             fields["contact"] = c
             fields["parsed"] = parsed
             if event["callsign"] in self.tracks and self.tracks[event["callsign"]]["id"] == event_id:
@@ -401,6 +416,17 @@ class Tracker:
                     )
                     if ai_res and ai_res.get("ok"):
                         res = ai_res
+                if not res.get("ok") or (
+                    not geo_agent.enabled()
+                    and geo_agent.offline_landmark_lookup((r.get("anchor") or {}).get("name"))
+                    and (
+                        "sounds alike" in (res.get("note") or "").lower()
+                        or norm((r.get("anchor") or {}).get("name") or "") != norm(res.get("anchor") or "")
+                    )
+                ):
+                    off_res = geo_agent.resolve_offline_landmark(r, self.gaz, last=last_geom, heading_deg=unit_heading)
+                    if off_res and off_res.get("ok"):
+                        res = off_res
                 res = await geo_agent.enrich_ambiguous_candidates(r, res, self.gaz, last=last_geom)
                 results.append(res)
 
