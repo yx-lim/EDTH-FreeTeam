@@ -23,6 +23,74 @@ radio net -> VAD cuts   -> speech-to-text -> net (who, to whom, what kind) -> ex
 
 See [docs/PRD.md](docs/PRD.md) and [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md).
 
+## Software architecture
+
+![System architecture](docs/architecture.jpg)
+
+```mermaid
+flowchart LR
+  subgraph IN[Field inputs]
+    ptt[Push-to-talk<br/>browser mic, 16 kHz WAV]
+    phone[Phone as a mic<br/>QR pairing, HTTPS on :8443]
+    net[Radio net<br/>live channel or recording, VAD cuts]
+    msg[WhatsApp / email text<br/>pasted or uploaded]
+  end
+  subgraph AI[Speech and reading]
+    stt[stt.py<br/>ElevenLabs Scribe, Gemini, Voxtral<br/>or local Whisper]
+    ext[extract.py<br/>Gemini or Mistral JSON<br/>rules fallback, Ollama offline]
+  end
+  subgraph CORE[FastAPI backend]
+    trk[tracker.py<br/>state per callsign, contacts,<br/>corrections, event log]
+    res[resolver.py + geo.py<br/>gazetteer, relation to region,<br/>speed check, candidates]
+    agent[geo_agent.py<br/>Gemini + Nominatim for places<br/>outside the local list]
+    out[app.py<br/>REST, WebSocket /ws,<br/>NVG / GeoJSON export, tiles]
+  end
+  subgraph UI[Vue 3 + MapLibre]
+    map[Live map<br/>APP-6 symbols, MGRS grid,<br/>regions, flight arrows]
+    deck[Operator panel<br/>confirm, reject, pick, edit,<br/>SOS, replay]
+  end
+  ptt --> stt
+  phone --> stt
+  net --> stt
+  stt --> ext
+  msg --> ext
+  ext --> trk
+  trk --> res
+  res -. unknown or doubtful place .-> agent
+  agent --> res
+  trk --> out
+  out -- WebSocket push --> map
+  out --> deck
+  deck -- confirm / pick / edit --> out
+```
+
+**How a report moves.** Audio becomes text in `backend/stt.py`. `backend/extract.py` turns the text into
+`{speaker, reports[]}`: who, what kind, which place, which relation, how far. The language model only names what
+was said. `backend/tracker.py` keeps the state of each callsign and contact, and `backend/resolver.py` turns each
+report into a region with deterministic geometry over the OpenStreetMap extract in `data/` (Shapely, metres, then
+MGRS). When the place is not in that list, or only matched by sound, `backend/geo_agent.py` asks Gemini and
+OpenStreetMap Nominatim. Every event is appended to `data/events.jsonl` and pushed to every open screen over
+`WS /ws`. The duty officer confirms, rejects, picks between candidate places or edits counts, and only confirmed
+items leave in the NVG and GeoJSON exports.
+
+**Online and offline.**
+
+| Step | With keys and internet | Without |
+|---|---|---|
+| Speech to text | ElevenLabs Scribe (or Gemini, Mistral Voxtral) | Local Whisper (MLX on Apple silicon, else faster-whisper) |
+| Reading the report | Gemini Flash-Lite (or Mistral) | Rules parser; Ollama (`qwen2.5:3b`) in offline mode when the rules find no place |
+| Places | Local gazetteer, then Gemini + Nominatim | Local gazetteer and cached Paris landmarks |
+| Base map | OpenStreetMap, Esri and OpenTopoMap tiles | Tiles cached with `scripts/fetch_offline_tiles.py`, served at `/tiles/` |
+
+A failed cloud call falls back to the local path for that report, so the map keeps working.
+
+**Running it.**
+- **Laptop**: `uvicorn backend.app:app` on :8000 and `npm run dev` on :5173, which proxies `/api` to the backend.
+  `scripts/phone_mic_https.py` adds HTTPS on :8443 so phones can use their microphone.
+- **One container** (`Dockerfile`, `render.yaml`): the backend also serves the built frontend from `frontend/dist`
+  and strips the `/api` prefix itself. The app has no login, so anyone with the URL can send reports, reset the map
+  and use the API keys set on the server.
+
 ## Run it
 
 ```bash
@@ -253,24 +321,6 @@ What this repo can do now, grouped by area. Updated after each major implementat
 
 ## Not done yet
 
-**Must fix**
-- Team app: old threats never leave its map (it draws from the event list, not the merged sightings).
-- Speech-to-text has not been tested on real radio-quality Ukrainian audio yet. Compare ElevenLabs Scribe, Gemini and
-  gpt-4o-transcribe on degraded recordings and score callsigns, places and numbers. (Skip Voxtral: no Ukrainian.)
-
-**Make the map more honest**
-- A misheard place should show two candidate places for the officer to pick (today: the best sound-alike, flagged).
-- Measure "truth was inside the circle X of 20" for the pitch slide.
-
-**Next features (by value)**
-1. Name landmarks by voice ("позначка: спалений танк") and load a daily code table.
-2. Casualty card from 200/300 reports.
-3. Friendly drone corridors, so infantry don't jam or shoot our own drones.
-4. Reported threats along a route ("last report 5 min ago", never called safe).
-5. Read a Lore-style log and build the map from it.
-
-**Later**: streaming speech-to-text, offline map tiles, ATAK export, "in front of" by building entrance.
-
-**Don't claim** Delta integration, a real front-line accuracy %, or that Lore can't do Ukrainian.
+Open work and things not to claim: [docs/NOT_DONE_YET.md](docs/NOT_DONE_YET.md).
 
 Map data © OpenStreetMap contributors, ODbL. The public OSM tile server is fine for development only.
