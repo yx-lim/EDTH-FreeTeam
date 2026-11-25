@@ -25,8 +25,6 @@ See [docs/PRD.md](docs/PRD.md) and [docs/SYSTEM_DESIGN.md](docs/SYSTEM_DESIGN.md
 
 ## Software architecture
 
-![System architecture](docs/architecture.jpg)
-
 ```mermaid
 flowchart LR
   subgraph IN[Field inputs]
