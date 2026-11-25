@@ -1,5 +1,14 @@
 # Voice-to-Map
 
+> **Not in this version.** On 25 Nov 2026 `main` was replaced with the `defense-c2-ui` branch. The previous `main` is
+> kept as [`main-backup-2026-11-25`](https://github.com/yx-lim/EDTH-FreeTeam/tree/main-backup-2026-11-25), which still has:
+>
+> - The Irpin zone and the zone picker in the top bar.
+> - The English, Ukrainian and French 100-report scripts and their offline fixes.
+> - The speech-to-text benchmark and the Ukrainian stress tests. This version has 236 tests instead of 344.
+> - The 22 Nov map fix. Without it, tanks vanish after 15 minutes, a picked place can be off-screen, and slow tiles
+>   can stop every marker from drawing.
+
 Starter for EDTH Paris 2026, Challenge 01 (Lysk): spoken position reports become live map updates.
 
 The idea that sets it apart: a report becomes an **uncertainty region**, not a pin, and the system keeps
