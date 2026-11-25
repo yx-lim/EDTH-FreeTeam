@@ -1,0 +1,2389 @@
+From dada87c0fce3e5975e6d1506466a71927fe439d5 Mon Sep 17 00:00:00 2001
+From: Nikita Nedoshovenko <nikita.nedoshovenko@outlook.com>
+Date: Fri, 20 Nov 2026 19:51:41 +0100
+Subject: [PATCH] Add Ukrainian/Russian language layer, move demo to Vincennes
+
+- Gemini prompts handle UA/RU/EN radio procedure, callsigns, corrections, number words, drone slang
+- Per-callsign unit memory; UA and RU spellings of a callsign are one unit
+- Landmark resolution: unit positions, mission codenames, alias table, then Nominatim
+- Shape-aware placement with uncertainty circles (offsets from edges, not centres)
+- Drone/enemy sightings become fused threat markers across units
+- New /api/process-text and /api/markers endpoints, text input fallback in the UI
+- Map shows each unit, uncertainty circles and threat markers
+- Stop tracking backend/.env (the committed key must be revoked)
+- Offline end-to-end test with fake Gemini and geocoder
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KG2RA2i89hGvASt44B7U7K
+---
+ .gitignore                                    |   4 +
+ README.md                                     |  19 +-
+ backend/config.py                             |   8 +-
+ backend/main.py                               | 194 +++++++++---------
+ backend/models.py                             |  38 +++-
+ backend/services/extract.py                   |  72 ++++---
+ backend/services/geocode.py                   |  14 +-
+ backend/services/language/README.md           | 119 +++++++++++
+ backend/services/language/__init__.py         |   0
+ backend/services/language/alias_lookup.py     | 161 +++++++++++++++
+ backend/services/language/angles.py           |  60 ++++++
+ backend/services/language/check_dataset.py    |  51 +++++
+ backend/services/language/evaluate.py         |  90 ++++++++
+ .../services/language/fetch_osm_landmarks.py  |  86 ++++++++
+ backend/services/language/fuse.py             | 173 ++++++++++++++++
+ backend/services/language/geometry.py         | 123 +++++++++++
+ .../services/language/landmark_aliases.csv    |  68 ++++++
+ backend/services/language/mission_points.csv  |   5 +
+ backend/services/language/radio_effect.py     |  87 ++++++++
+ backend/services/language/threat_lookup.py    |  41 ++++
+ backend/services/language/threat_vocab.csv    |  39 ++++
+ .../language/voice_to_map_test_set.csv        |  59 ++++++
+ backend/services/placement.py                 | 106 ++++++++++
+ backend/services/store.py                     |  65 +++++-
+ backend/services/transcribe.py                |   9 +-
+ backend/tests/test_pipeline_offline.py        |  55 +++++
+ frontend/src/App.jsx                          |  12 +-
+ frontend/src/components/EventLog.jsx          |   4 +-
+ frontend/src/components/TacticalMap.jsx       | 126 ++++++++----
+ frontend/src/components/TextReport.jsx        |  40 ++++
+ frontend/src/styles.css                       |  14 +-
+ 31 files changed, 1749 insertions(+), 193 deletions(-)
+ create mode 100644 backend/services/language/README.md
+ create mode 100644 backend/services/language/__init__.py
+ create mode 100644 backend/services/language/alias_lookup.py
+ create mode 100644 backend/services/language/angles.py
+ create mode 100644 backend/services/language/check_dataset.py
+ create mode 100644 backend/services/language/evaluate.py
+ create mode 100644 backend/services/language/fetch_osm_landmarks.py
+ create mode 100644 backend/services/language/fuse.py
+ create mode 100644 backend/services/language/geometry.py
+ create mode 100644 backend/services/language/landmark_aliases.csv
+ create mode 100644 backend/services/language/mission_points.csv
+ create mode 100644 backend/services/language/radio_effect.py
+ create mode 100644 backend/services/language/threat_lookup.py
+ create mode 100644 backend/services/language/threat_vocab.csv
+ create mode 100644 backend/services/language/voice_to_map_test_set.csv
+ create mode 100644 backend/services/placement.py
+ create mode 100644 backend/tests/test_pipeline_offline.py
+ create mode 100644 frontend/src/components/TextReport.jsx
+
+diff --git a/.gitignore b/.gitignore
+index d8cfe5b..b8919f3 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -2,3 +2,7 @@ frontend/node_modules/
+ frontend/dist/
+ __pycache__/
+ *.py[cod]
++
++# secrets
++backend/.env
++.env
+diff --git a/README.md b/README.md
+index 13c46b7..cdf81e5 100644
+--- a/README.md
++++ b/README.md
+@@ -2,9 +2,24 @@
+ 
+ A voice-driven tactical geospatial dashboard built with FastAPI, Gemini, OpenStreetMap, and React.
+ 
++## What changed: language layer (Ukrainian / Russian / English)
++
++- Demo area is now **Vincennes** (next to the EDTH venue), not Washington, D.C.
++- Reports can be in **Ukrainian, Russian, English or mixed**. Transcription keeps the original language.
++- Each **callsign** has its own position and history ("Граніт" and "Гранит" are the same unit).
++- Landmarks resolve in this order: other units' positions → **mission codenames** (`backend/services/language/mission_points.csv`)
++  → **alias table** (spoken name → OSM name) → Nominatim → nearest generic POI.
++- Positions come with an **uncertainty circle**; offsets start from a place's **edge**, not its centre.
++- **Drone / enemy sightings** become threat markers; reports of the same drone from different units are **merged**
++  ("confirmed by 2 units"). Drone slang ("ждун", "мопед", "крило") is mapped to a type.
++- New endpoints: `POST /api/process-text` (`{"transcript": "..."}`, same pipeline without audio, also the demo fallback),
++  `GET /api/markers` (fused threat markers).
++- Offline test with fake Gemini/OSM: `cd backend && python tests/test_pipeline_offline.py`
++- Details and datasets: `backend/services/language/README.md`. Demo mission points are placeholders: move them if you like.
++
+ ## Demo assumptions
+ 
+-- Demo city: Washington, D.C.
++- Demo area: Vincennes, Paris (previously Washington, D.C.)
+ - Default heading: North (0 degrees)
+ - Default spatial modifier distance: 30 meters
+ - Default `towards` step: 50 meters
+@@ -20,7 +35,7 @@ python -m pip install -r requirements.txt
+ cp .env.example .env
+ ```
+ 
+-Add a valid `GEMINI_API_KEY` to `backend/.env`, then run:
++Add a valid `GEMINI_API_KEY` to `backend/.env` (never commit this file), then run:
+ 
+ ```bash
+ cd backend
+diff --git a/backend/config.py b/backend/config.py
+index cd88081..a66a47e 100644
+--- a/backend/config.py
++++ b/backend/config.py
+@@ -5,10 +5,14 @@ from dotenv import load_dotenv
+ BASE_DIR = Path(__file__).resolve().parent
+ load_dotenv(BASE_DIR / ".env")
+ 
+-DEMO_CENTER = [38.9072, -77.0369]
+-DEMO_VIEWBOX = (38.7946, -77.1198, 39.0001, -76.9090)
++# Demo area: Vincennes and the Bois de Vincennes (Paris), next to the EDTH venue.
++DEMO_AREA = "Vincennes"
++DEMO_CENTER = [48.8445, 2.4385]
++DEMO_VIEWBOX = (48.8200, 2.4000, 48.8600, 2.4800)  # south, west, north, east
++DEMO_CITY_SUFFIXES = ["Vincennes", "Paris", "Val-de-Marne"]
+ NOMINATIM_USER_AGENT = "voice-to-tactical-map-hackathon/1.0"
+ DEFAULT_MODIFIER_DISTANCE_M = 30
+ TOWARDS_DISTANCE_M = 50
+ NOMINATIM_MIN_INTERVAL_SECONDS = 1.05
+ GEMINI_MODEL = "gemini-flash-lite-latest"
++DEFAULT_CALLSIGN = "Viper One"
+diff --git a/backend/main.py b/backend/main.py
+index bda5261..4639697 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -8,11 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import JSONResponse
+ 
+ from config import DEMO_CENTER
+-from models import LocationEvent, SpatialIntent
++from models import LocationEvent, SpatialIntent, Threat
+ from services.extract import extract_intent
+-from services.geocode import geocode_landmark
+-from services.overpass import find_nearest_generic_landmark
+-from services.spatial import calculate_relative_offset, calculate_towards_offset
++from services.placement import fuse_threat, place, resolve_landmark_position
+ from services.store import store
+ from services.transcribe import transcribe_audio
+ 
+@@ -69,102 +67,102 @@ async def process_audio(audio: UploadFile = File(...)) -> LocationEvent:
+         stage_started = time.perf_counter()
+         transcript = await transcribe_audio(audio_bytes, audio.filename or "report.webm", audio.content_type or "audio/webm")
+         logger.info("stage=transcribe transcript=%r ms=%.1f", transcript, (time.perf_counter() - stage_started) * 1000)
++        return await process_transcript(transcript, pipeline_started)
++    except HTTPException:
++        raise
++    except Exception as exc:
++        raise _pipeline_error(exc) from exc
+ 
+-        previous = store.previous_coords or DEMO_CENTER
+-        stage_started = time.perf_counter()
+-        intent = await extract_intent(
+-            transcript,
+-            previous[0],
+-            previous[1],
+-            store.last_landmark,
+-            store.heading,
+-            store.callsign,
+-        )
+-        logger.info("stage=extract landmark=%r relation=%r ms=%.1f", intent.landmark, intent.relation,
+-                    (time.perf_counter() - stage_started) * 1000)
+-
+-        landmark_coords = None
+-        resolved_coords = list(previous)
+-
+-        if intent.action == "stop":
+-            event = LocationEvent(
+-                id=str(uuid.uuid4()), timestamp=_utc_now(), transcript=transcript, intent=intent,
+-                landmark_coords=None, resolved_coords=resolved_coords, status="ok", error=None,
+-            )
+-        else:
+-            landmark = intent.landmark
+-            if landmark:
+-                stage_started = time.perf_counter()
+-                is_generic = landmark.lower().strip() in {"church", "hospital", "bank", "school", "town hall"}
+-                geocode_result = await geocode_landmark(landmark, previous[0], previous[1])
+-                if is_generic and geocode_result is None:
+-                    geocode_result = await find_nearest_generic_landmark(
+-                        landmark, previous[0], previous[1]
+-                    )
+-                logger.info("stage=geocode landmark=%r found=%s ms=%.1f", landmark,
+-                            geocode_result is not None, (time.perf_counter() - stage_started) * 1000)
+-
+-                if geocode_result is None:
+-                    event = LocationEvent(
+-                        id=str(uuid.uuid4()), timestamp=_utc_now(), transcript=transcript, intent=intent,
+-                        landmark_coords=None, resolved_coords=None, status="error",
+-                        error=f"Could not geocode landmark: {landmark}",
+-                    )
+-                    store.add(event)
+-                    await store.broadcast(event)
+-                    logger.info("stage=complete status=error ms=%.1f", (time.perf_counter() - pipeline_started) * 1000)
+-                    return event
+-
+-                landmark_coords = [geocode_result["lat"], geocode_result["lon"]]
+-                if intent.relation == "towards":
+-                    resolved_coords = list(calculate_towards_offset(
+-                        previous[0], previous[1], (landmark_coords[0], landmark_coords[1]),
+-                        geocode_result.get("geojson"), intent.distance_m,
+-                    ))
+-                elif intent.relation == "at":
+-                    resolved_coords = landmark_coords.copy()
+-                else:
+-                    bearing_override = intent.bearing_override
+-                    if bearing_override is None:
+-                        if intent.relation == "right_of":
+-                            bearing_override = (store.heading + 90) % 360
+-                        elif intent.relation == "behind":
+-                            bearing_override = (store.heading + 180) % 360
+-                        elif intent.relation == "left_of":
+-                            bearing_override = (store.heading + 270) % 360
+-                        elif intent.relation == "front_of":
+-                            bearing_override = store.heading
+-                    resolved_coords = list(calculate_relative_offset(
+-                        landmark_coords[0], landmark_coords[1], intent.relation, intent.distance_m,
+-                        bearing_override=bearing_override,
+-                    ))
+-
+-            event = LocationEvent(
+-                id=str(uuid.uuid4()), timestamp=_utc_now(), transcript=transcript, intent=intent,
+-                landmark_coords=landmark_coords, resolved_coords=resolved_coords, status="ok", error=None,
+-            )
+-
+-        if intent.bearing_override is not None:
+-            store.heading = intent.bearing_override
+-        store.add(event)
+-        await store.broadcast(event)
+-        logger.info("stage=complete status=%s ms=%.1f", event.status,
+-                    (time.perf_counter() - pipeline_started) * 1000)
+-        return event
+ 
++@app.post("/api/process-text", response_model=LocationEvent)
++async def process_text(payload: dict) -> LocationEvent:
++    """Same pipeline without audio: for testing, the demo fallback, and the scoring script."""
++    transcript = (payload or {}).get("transcript", "").strip()
++    if not transcript:
++        raise HTTPException(status_code=400, detail="Send {\"transcript\": \"...\"}")
++    try:
++        return await process_transcript(transcript, time.perf_counter())
+     except HTTPException:
+         raise
+     except Exception as exc:
+-        logger.exception("pipeline failed: %s", exc)
+-        error_text = str(exc)
+-        if "GEMINI_API_KEY is not configured" in error_text:
+-            raise HTTPException(
+-                status_code=503,
+-                detail="Gemini is not configured. Set a valid GEMINI_API_KEY in backend/.env.",
+-            ) from exc
+-        if "API_KEY_INVALID" in error_text or "invalid api key" in error_text.lower():
+-            raise HTTPException(
+-                status_code=502,
+-                detail="Gemini authentication failed. Replace GEMINI_API_KEY in backend/.env with a valid Gemini API key.",
+-            ) from exc
+-        raise HTTPException(status_code=422, detail=f"Spatial intent processing failed: {exc}") from exc
++        raise _pipeline_error(exc) from exc
++
++
++@app.get("/api/markers")
++async def get_markers() -> list[dict]:
++    """Fused enemy / drone markers (one per object, not one per report)."""
++    now = time.time()
++    return [{
++        "id": m.id, "category": m.category, "lat": m.lat, "lon": m.lon,
++        "uncertainty_m": round(m.uncertainty_m), "count": m.count, "confidence": m.confidence,
++        "sources": [r for r, _ in m.sources],
++    } for m in store.fuser.markers(now=now)]
++
++
++async def process_transcript(transcript: str, pipeline_started: float) -> LocationEvent:
++    # Who is speaking decides whose memory we use.
++    stage_started = time.perf_counter()
++    guess = store.unit(store.callsign)
++    intent = await extract_intent(
++        transcript,
++        (guess["coords"] or DEMO_CENTER)[0],
++        (guess["coords"] or DEMO_CENTER)[1],
++        guess["last_landmark"],
++        guess["heading"],
++        store.callsign,
++    )
++    callsign = store.canonical(intent.callsign or store.callsign)
++    unit = store.unit(callsign)
++    speaker_known = unit["coords"] is not None
++    previous = unit["coords"] or DEMO_CENTER
++    logger.info("stage=extract callsign=%r landmark=%r relation=%r action=%r ms=%.1f", callsign,
++                intent.landmark, intent.relation, intent.action, (time.perf_counter() - stage_started) * 1000)
++
++    def make_event(**kw) -> LocationEvent:
++        return LocationEvent(id=str(uuid.uuid4()), timestamp=_utc_now(), transcript=transcript,
++                             intent=intent, callsign=callsign, **kw)
++
++    if intent.action == "stop" or not intent.landmark or intent.landmark.lower() in {"unknown", "none"}:
++        event = make_event(landmark_coords=None, resolved_coords=list(previous), status="ok",
++                           uncertainty_m=None if speaker_known else 500.0,
++                           placement_method="no landmark: last known position")
++    else:
++        stage_started = time.perf_counter()
++        landmark = await resolve_landmark_position(intent.landmark, callsign, previous,
++                                                   store.unit_positions(exclude=callsign))
++        logger.info("stage=geocode landmark=%r found=%s ms=%.1f", intent.landmark, landmark is not None,
++                    (time.perf_counter() - stage_started) * 1000)
++        if landmark is None:
++            event = make_event(landmark_coords=None, resolved_coords=None, status="error",
++                               error=f"Could not find landmark: {intent.landmark}")
++            store.add(event)
++            await store.broadcast(event)
++            return event
++
++        lat, lon, uncertainty, method = place(intent, landmark, previous, unit["heading"], speaker_known)
++        threat = fuse_threat(store, intent, callsign, lat, lon, uncertainty)
++        event = make_event(
++            landmark_coords=[landmark["lat"], landmark["lon"]], resolved_coords=[lat, lon], status="ok",
++            landmark_source=landmark.get("source"), landmark_name=landmark.get("name"),
++            uncertainty_m=round(uncertainty, 1), placement_method=method,
++            threat=Threat(**threat) if threat else None,
++        )
++
++    if intent.bearing_override is not None and intent.action in {"move", "locate"}:
++        unit["heading"] = intent.bearing_override
++    store.add(event)
++    await store.broadcast(event)
++    logger.info("stage=complete status=%s ms=%.1f", event.status, (time.perf_counter() - pipeline_started) * 1000)
++    return event
++
++
++def _pipeline_error(exc: Exception) -> HTTPException:
++    logger.exception("pipeline failed: %s", exc)
++    error_text = str(exc)
++    if "GEMINI_API_KEY is not configured" in error_text:
++        return HTTPException(status_code=503,
++                             detail="Gemini is not configured. Set a valid GEMINI_API_KEY in backend/.env.")
++    if "API_KEY_INVALID" in error_text or "invalid api key" in error_text.lower():
++        return HTTPException(status_code=502,
++                             detail="Gemini authentication failed. Replace GEMINI_API_KEY in backend/.env.")
++    return HTTPException(status_code=422, detail=f"Spatial intent processing failed: {exc}")
+diff --git a/backend/models.py b/backend/models.py
+index cf978f8..135d1ae 100644
+--- a/backend/models.py
++++ b/backend/models.py
+@@ -2,17 +2,38 @@ from typing import Literal
+ 
+ from pydantic import BaseModel
+ 
++Relation = Literal[
++    "at", "near", "north_of", "south_of", "east_of", "west_of",
++    "northeast_of", "northwest_of", "southeast_of", "southwest_of",
++    "front_of", "behind", "left_of", "right_of", "towards", "above",
++]
++
+ 
+ class SpatialIntent(BaseModel):
+-    action: Literal["locate", "move", "stop", "report"]
++    action: Literal["locate", "move", "stop", "report", "contact", "drone_sighting"]
+     landmark: str
+-    relation: Literal[
+-        "at", "near", "north_of", "south_of", "east_of", "west_of",
+-        "front_of", "behind", "left_of", "right_of", "towards",
+-    ]
++    relation: Relation
+     distance_m: int
+     tactical_confirmation: str
+     bearing_override: float | None
++    # Language layer fields (all optional so older clients keep working)
++    callsign: str | None = None
++    language: str | None = None          # "uk" | "ru" | "en" | "mixed"
++    vague: bool = False                  # "метрів сто", "близько", "about"
++    threat_word: str | None = None       # drone / threat word as spoken: "ждун", "мопед"
++    count: int = 1                       # "два мавіки" -> 2
++    another: bool = False                # "ще один", "ещё один", "another"
++
++
++class Threat(BaseModel):
++    type: str
++    category: str
++    matched: str
++    verified: bool
++    marker_id: int | None = None
++    count: int = 1
++    confidence: str | None = None
++    fusion: str | None = None            # "new marker", "merged with another unit's report", ...
+ 
+ 
+ class LocationEvent(BaseModel):
+@@ -24,3 +45,10 @@ class LocationEvent(BaseModel):
+     resolved_coords: list[float] | None = None
+     status: Literal["ok", "error"]
+     error: str | None = None
++    # Added by the language layer
++    callsign: str | None = None
++    landmark_source: str | None = None   # "mission" | "unit" | "alias" | "raw"
++    landmark_name: str | None = None     # the name actually searched / matched
++    uncertainty_m: float | None = None   # draw a circle of this radius
++    placement_method: str | None = None
++    threat: Threat | None = None
+diff --git a/backend/services/extract.py b/backend/services/extract.py
+index 6145f11..35311a7 100644
+--- a/backend/services/extract.py
++++ b/backend/services/extract.py
+@@ -5,29 +5,41 @@ import os
+ import google.generativeai as genai
+ from pydantic import ValidationError
+ 
++from config import GEMINI_MODEL
+ from models import SpatialIntent
+ 
+-SYSTEM_PROMPT = """Act as a Tactical Military Dispatcher & Geolocation Agent.
+-Accept the spoken transcript, soldier's last known coordinates [lat, lon], heading, last landmark, and callsign.
+-Return ONLY valid JSON with no markdown or explanation, matching this exact schema:
+-{
+-  "action": "locate",
+-  "landmark": "St. John's Church",
+-  "relation": "behind",
+-  "distance_m": 30,
+-  "bearing_override": null,
+-  "tactical_confirmation": "Viper One confirmed 30m south of St. John's Church. Grid updated."
+-}
+-Action: locate, move, stop, or report.
+-Relation: at, near, north_of, south_of, east_of, west_of, front_of, behind, left_of, right_of, or towards.
+-For generic landmarks such as "the church", extract "church". Use the coordinates to resolve the nearest matching landmark within 1000m.
+-If distance is omitted, default to 30 meters. If relation is at, distance_m is 0.
+-Generate a crisp military confirmation naming the callsign, distance, relation, and landmark.
+-Few-shot examples:
+-1. "I am at the town hall." -> {"action":"locate","landmark":"town hall","relation":"at","distance_m":0,"bearing_override":null,"tactical_confirmation":"Viper One confirmed at Town Hall. Grid updated."}
+-2. "I am 20m behind the church." -> {"action":"locate","landmark":"church","relation":"behind","distance_m":20,"bearing_override":null,"tactical_confirmation":"Viper One confirmed 20m behind Church. Grid updated."}
+-3. "Moving towards 35th street." -> {"action":"move","landmark":"35th street","relation":"towards","distance_m":50,"bearing_override":null,"tactical_confirmation":"Viper One moving 50m towards 35th Street. Grid updated."}
+-4. "I am left to the church." -> {"action":"locate","landmark":"church","relation":"left_of","distance_m":30,"bearing_override":null,"tactical_confirmation":"Viper One confirmed 30m left of Church. Grid updated."}
++SYSTEM_PROMPT = """Act as a Tactical Military Dispatcher & Geolocation Agent for Ukrainian and NATO units.
++The transcript can be in Ukrainian, Russian, English, or a mix of them (surzhyk, code-switching).
++Radio procedure: "Вежа, я Сокіл, ..., прийом" means "Tower, this is Sokil, ..., over":
++the callsign AFTER "я" / "this is" is the SPEAKER. "Плюс" = roger. "Мінус" / "отставить" / "correction" cancels what came before.
++Accept the transcript, the speaker's last known coordinates, heading, last landmark, and default callsign.
++Return ONLY valid JSON matching the schema. Rules:
++- landmark: the place EXACTLY as spoken, in the original language, base form if you can, WITHOUT prepositions
++  ("від Сараю" -> "Сарай", "у Ромашки" -> "Ромашка", "Венсенського замку" -> "Венсенський замок").
++  Unit codenames (Ромашка, Сарай, орієнтир 3, друга посадка) are landmarks. Never translate them.
++  After a correction ("мінус", "отставить", "correction"), use ONLY the corrected landmark.
++- relation: at, near, north_of, south_of, east_of, west_of, northeast_of, northwest_of, southeast_of, southwest_of,
++  front_of, behind, left_of, right_of, towards, above. "на північ від" = north_of, "севернее" = north_of,
++  "праворуч" = right_of, "над" = above.
++- distance_m: metres as an integer. Convert number words: "двісті п'ятдесят" = 250, "полтораста" = 150. Default 30, 0 for "at".
++- vague: true if the distance or place is approximate ("метрів сто", "близько", "десь", "about", "roughly").
++- bearing_override: degrees if a clock direction or azimuth is given ("на третій годині" = heading + 90; "азимут 15-00" = 90), else null.
++- action: locate, move, stop, report, contact (enemy people or vehicles seen), drone_sighting (any drone seen).
++- callsign: the speaker's callsign as spoken, or null.
++- language: uk, ru, en or mixed.
++- threat_word: the drone or threat word EXACTLY as spoken ("ждун", "мопед", "пташка", "орлан", "FPV", "крило"), else null.
++- count: how many objects ("два мавіки" = 2), default 1.
++- another: true if the speaker says "ще один", "ещё один", "another", "second one".
++- tactical_confirmation: a crisp read-back in the SAME language as the transcript, naming the callsign, relation, distance and landmark.
++Examples:
++1. "Вежа, я Сокіл, сто метрів на схід від Сараю, прийом." ->
++{"action":"locate","landmark":"Сарай","relation":"east_of","distance_m":100,"bearing_override":null,"callsign":"Сокіл","language":"uk","vague":false,"threat_word":null,"count":1,"another":false,"tactical_confirmation":"Сокіл, прийняв: 100 м на схід від Сараю."}
++2. "Башня, я Гранит, на Сарае, вижу двоих, приём." ->
++{"action":"contact","landmark":"Сарай","relation":"at","distance_m":0,"bearing_override":null,"callsign":"Гранит","language":"ru","vague":false,"threat_word":null,"count":2,"another":false,"tactical_confirmation":"Гранит, принял: двое у Сарая."}
++3. "Вежа, я Лис, ждун біля Сараю, метрів п'ятдесят на захід, не підходити, прийом." ->
++{"action":"drone_sighting","landmark":"Сарай","relation":"west_of","distance_m":50,"bearing_override":null,"callsign":"Лис","language":"uk","vague":true,"threat_word":"ждун","count":1,"another":false,"tactical_confirmation":"Лис, прийняв: ждун 50 м на захід від Сараю."}
++4. "Hawk, this is Viper 2, 50 metres north of the chateau, over." ->
++{"action":"locate","landmark":"chateau","relation":"north_of","distance_m":50,"bearing_override":null,"callsign":"Viper 2","language":"en","vague":false,"threat_word":null,"count":1,"another":false,"tactical_confirmation":"Viper 2 confirmed 50 m north of the Chateau."}
+ """
+ 
+ 
+@@ -42,6 +54,11 @@ def _parse(response_text: str) -> SpatialIntent:
+         payload["distance_m"] = 0 if relation == "at" else (50 if relation == "towards" else 30)
+     if "bearing_override" not in payload:
+         payload["bearing_override"] = None
++    for key, default in (("callsign", None), ("language", None), ("vague", False),
++                         ("threat_word", None), ("count", 1), ("another", False)):
++        payload.setdefault(key, default)
++    if not payload.get("count"):
++        payload["count"] = 1
+     intent = SpatialIntent.model_validate(payload)
+     if intent.distance_m < 0:
+         raise ValueError("distance_m must be greater than or equal to 0")
+@@ -55,21 +72,28 @@ def _parse(response_text: str) -> SpatialIntent:
+ def _generate(prompt: str, api_key: str) -> str:
+     genai.configure(api_key=api_key)
+     model = genai.GenerativeModel(
+-        model_name="gemini-flash-lite-latest",
++        model_name=GEMINI_MODEL,
+         system_instruction=SYSTEM_PROMPT,
+     )
+     response_schema = {
+         "type": "object",
+         "properties": {
+-            "action": {"type": "string", "enum": ["locate", "move", "stop", "report"]},
++            "action": {"type": "string", "enum": ["locate", "move", "stop", "report", "contact", "drone_sighting"]},
+             "landmark": {"type": "string"},
+             "relation": {"type": "string", "enum": [
+                 "at", "near", "north_of", "south_of", "east_of", "west_of",
+-                "front_of", "behind", "left_of", "right_of", "towards",
++                "northeast_of", "northwest_of", "southeast_of", "southwest_of",
++                "front_of", "behind", "left_of", "right_of", "towards", "above",
+             ]},
+             "distance_m": {"type": "integer"},
+             "bearing_override": {"type": "number", "nullable": True},
+             "tactical_confirmation": {"type": "string"},
++            "callsign": {"type": "string", "nullable": True},
++            "language": {"type": "string", "enum": ["uk", "ru", "en", "mixed"]},
++            "vague": {"type": "boolean"},
++            "threat_word": {"type": "string", "nullable": True},
++            "count": {"type": "integer"},
++            "another": {"type": "boolean"},
+         },
+         "required": ["action", "landmark", "relation", "distance_m", "bearing_override", "tactical_confirmation"],
+     }
+diff --git a/backend/services/geocode.py b/backend/services/geocode.py
+index 352d832..c99acb3 100644
+--- a/backend/services/geocode.py
++++ b/backend/services/geocode.py
+@@ -5,7 +5,7 @@ from typing import Any
+ import httpx
+ from geopy.distance import geodesic
+ 
+-from config import DEMO_VIEWBOX, NOMINATIM_MIN_INTERVAL_SECONDS, NOMINATIM_USER_AGENT
++from config import DEMO_CITY_SUFFIXES, DEMO_VIEWBOX, NOMINATIM_MIN_INTERVAL_SECONDS, NOMINATIM_USER_AGENT
+ 
+ _cache: dict[str, dict[str, Any] | None] = {}
+ _last_request = 0.0
+@@ -25,16 +25,8 @@ async def geocode_landmark(name: str, soldier_lat: float | None = None,
+         return _cache[key]
+ 
+     south, west, north, east = DEMO_VIEWBOX
+-    alias_map = {
+-        "catholic university": "Catholic University of America",
+-        "catholic university of america": "Catholic University of America",
+-    }
+-    normalized_alias = alias_map.get(normalize_landmark(name), name)
+-    query_variants = [
+-        normalized_alias,
+-        f"{normalized_alias}, Washington, DC",
+-        f"{normalized_alias}, District of Columbia",
+-    ]
++    # Spoken-name -> OSM-name translation now happens in services/language (alias table).
++    query_variants = [name] + [f"{name}, {suffix}" for suffix in DEMO_CITY_SUFFIXES]
+ 
+     items = []
+     async with _rate_lock:
+diff --git a/backend/services/language/README.md b/backend/services/language/README.md
+new file mode 100644
+index 0000000..c0ee27f
+--- /dev/null
++++ b/backend/services/language/README.md
+@@ -0,0 +1,119 @@
++# Language layer for Voice-to-Map (Team 27)
++
++This folder makes the pipeline work on real Ukrainian and Russian radio talk,
++and measures how well it works. It plugs into **layer 2 (output fields)** and
++**layer 3 (geocoding and geometry)**. Whisper, Mistral, FastAPI and the frontend stay as they are.
++
++Owner: Nikita (datasets and testing). Questions about the data go to him.
++
++```
++voice ─► Whisper ─► Mistral (layer 2) ─► JSON ─► resolve() ─► place_report() ─► fuser.add() ─► map
++                                          │         │               │                │
++                                          │   alias_lookup.py   geometry.py        fuse.py
++                                          │   threat_lookup.py  angles.py
++                                          └── fields below
++```
++
++## 1. What layer 2 (Mistral) must output, one JSON per call
++
++```json
++{
++  "id": "UA01",                    // only needed for testing
++  "callsign": "Сокіл",             // who is speaking
++  "action": "position",            // position | moving | halted | observing | contact | drone_sighting
++  "landmark": "Венсенський замок", // as spoken, without prepositions ("від", "біля", "от")
++  "relation": "north_of",          // north_of ... northwest_of | at | near | behind | between | above
++                                   // | same_as_last | clock_3 | half_right | bearing_mils_1500
++  "distance": 50,                  // metres as a number ("двісті п'ятдесят" -> 250); 0 if none
++  "vague": false,                  // true for "метрів сто", "близько", "трохи далі"
++  "heading": "east",               // direction the speaker is moving, if said ("рухаюсь на схід")
++  "threat_word": "ждун",           // drone or threat word as spoken, if any
++  "count": 1,                      // "два мавіки" -> 2
++  "another": false                 // true for "ще один", "ещё один", "another", "другий"
++}
++```
++
++Corrections ("мінус", "отставить", "correction") must replace the earlier landmark.
++The full list of `relation` values used in testing is in the `relation` column of
++`voice_to_map_test_set.csv`.
++
++## 2. What to call in layer 3
++
++```python
++from alias_lookup import resolve
++from threat_lookup import resolve_threat
++from angles import clock_to_bearing, mils_to_degrees, words_to_bearing
++from geometry import place_report
++from fuse import SightingFuser
++
++fuser = SightingFuser()            # one per command post
++
++# a) Where is the landmark? Checks moving units, then mission codenames, then aliases.
++place = resolve(js["landmark"], area="Vincennes",
++                unit_positions={"Птаха": (lat, lon, unix_time)})   # drones, other patrols
++# place["source"] == "unit" | "mission"  -> has lat/lon, no OSM call needed
++# place["source"] == "alias" | "raw"     -> search place["name"] in landmarks.csv / Nominatim
++
++# b) Turn clock / mils / "half right" into a bearing when needed
++bearing = clock_to_bearing(3, heading=90)          # "на 3 годині", moving east
++bearing = mils_to_degrees(1500, system="ua")       # "азимут 15-00" (6000-mil system)
++
++# c) Place the report using the landmark's SHAPE, not its centre
++pos = place_report(coords, kind, js["relation"], js["distance"],
++                   last_position=unit_history.get(js["callsign"]),
++                   vague=js["vague"],
++                   bearing_deg=bearing)            # only with relation="bearing"
++# -> {"lat", "lon", "uncertainty_m", "method"}   draw a CIRCLE of uncertainty_m
++
++# d) Drone or enemy sightings: merge duplicates across units
++threat = resolve_threat(js["threat_word"])         # -> {"type", "category", ...} or None
++marker, what = fuser.add(js["callsign"], threat["category"], pos["lat"], pos["lon"],
++                         pos["uncertainty_m"], t=time.time(),
++                         count=js["count"], another=js["another"])
++fuser.markers(now=time.time())                     # what the map draws
++```
++
++`coords` and `kind` come from `landmarks.csv` (columns `geometry` and `kind_of_shape`).
++For a mission point, use `[(lat, lon)]` and `"point"`.
++
++## 3. Files
++
++| File | What it is | Needed for demo? |
++|---|---|---|
++| `alias_lookup.py` | Finds a place from how it's spoken (endings, Russian or Ukrainian, numbers as words) | **Yes** |
++| `landmark_aliases.csv` | Spoken names to OSM names, EN/UK/RU | **Yes** |
++| `mission_points.csv` | Unit codenames (Ромашка, Сарай...) with coordinates. **Fill in lat/lon before the demo** | **Yes** |
++| `geometry.py` | Places reports using shapes and gives an uncertainty circle (`pip install shapely`) | **Yes** |
++| `threat_lookup.py` + `threat_vocab.csv` | Drone slang to standard type ("ждун", "мопед", "крило") | Yes, if drone demo |
++| `fuse.py` | Merges sightings of the same drone from different units, keeps identical drones apart | Yes, if drone demo |
++| `angles.py` | Clock method, mils (6000 vs 6400), half right | Nice to have |
++| `fetch_osm_landmarks.py` | Downloads all named places with outlines into `landmarks.csv`, run once with internet | Yes, for offline |
++| `voice_to_map_test_set.csv` | 58 test calls (EN, UK, RU, mixed) with correct answers | Testing |
++| `check_dataset.py` | Checks the datasets agree with each other, no audio needed | Testing |
++| `evaluate.py` | Scores `predictions.jsonl` and prints accuracy by language | Testing |
++
++## 4. Tonight
++
++1. `pip install shapely requests`
++2. `python fetch_osm_landmarks.py`, which creates `landmarks.csv`. If it errors, widen the area boxes at the top.
++3. Pick 4 points in the Bois de Vincennes on the map and paste lat/lon into `mission_points.csv`.
++4. `python check_dataset.py` should say every call resolves.
++5. Wire `resolve()` and `place_report()` into layer 3. Everything else can come after the core demo works.
++
++## 5. Testing (Saturday)
++
++Nikita records the calls. Run each through the pipeline and write one JSON line per call to
++`predictions.jsonl` (fields as in section 1, plus `lat` and `lon`), then:
++
++```
++python evaluate.py
++```
++
++Calls are split into a **practice set** (tune on these as much as you like) and a **held-out set**
++(run once on Sunday morning; that is the number for the slide). Don't tune on held-out results.
++
++## Rules
++
++* Invented callsigns and public places only. Never real positions or unit names.
++* Speeds and time windows in `fuse.py` are estimates. Tune them, and say so if asked.
++* A circle that is honest beats a pin that is precise and wrong.
+diff --git a/backend/services/language/__init__.py b/backend/services/language/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/backend/services/language/alias_lookup.py b/backend/services/language/alias_lookup.py
+new file mode 100644
+index 0000000..bdef2f2
+--- /dev/null
++++ b/backend/services/language/alias_lookup.py
+@@ -0,0 +1,161 @@
++"""Landmark resolution for Voice-to-Map (layer 3, before the Nominatim search).
++
++Order of lookup:
++  1. Mission reference points (unit codenames loaded before the patrol)
++     -> returns fixed coordinates, OSM is never asked.
++  2. Alias table (how people say a place -> its OSM name)
++     -> returns the OSM name to send to Nominatim.
++  3. Nothing matched -> returns the spoken text for Nominatim to try.
++
++Usage:
++    from alias_lookup import resolve
++    resolve("Ромашці")                 # {'source': 'mission', 'name': 'Ромашка', 'lat': .., 'lon': ..}
++    resolve("Венсенського замку")      # {'source': 'alias', 'name': 'Château de Vincennes'}
++    resolve("Notre-Dame")              # {'source': 'raw', 'name': 'Notre-Dame'}
++"""
++import csv
++import unicodedata
++from pathlib import Path
++
++HERE = Path(__file__).parent
++ALIAS_FILE = HERE / "landmark_aliases.csv"
++MISSION_FILE = HERE / "mission_points.csv"
++
++# Spoken numbers -> digits, so "орієнтир три" matches "Орієнтир 3".
++_NUMBERS = {
++    "один": "1", "одна": "1", "перший": "1", "первый": "1", "one": "1",
++    "два": "2", "дві": "2", "две": "2", "другий": "2", "второй": "2", "two": "2",
++    "три": "3", "третій": "3", "третий": "3", "three": "3",
++    "чотири": "4", "четыре": "4", "four": "4",
++    "пять": "5", "пять": "5", "five": "5",
++    "шість": "6", "шесть": "6", "six": "6",
++    "сім": "7", "семь": "7", "seven": "7",
++    "вісім": "8", "восемь": "8", "eight": "8",
++    "девять": "9", "nine": "9",
++    "десять": "10", "ten": "10",
++}
++
++
++_FOLD = str.maketrans({"і": "и", "ї": "и", "ы": "и", "є": "е", "э": "е", "ґ": "г", "ъ": "", "ь": ""})
++
++
++def _norm(text: str) -> str:
++    """Lowercase, strip accents, apostrophes and punctuation; spoken numbers to digits."""
++    text = text.lower().replace("'", "").replace("’", "").replace("ʼ", "")
++    words = []
++    for w in text.replace(",", " ").replace(".", " ").split():
++        w = _NUMBERS.get(w, w)
++        w = unicodedata.normalize("NFKD", w)
++        w = "".join(c for c in w if not unicodedata.combining(c))
++        # Fold Ukrainian and Russian letters together so "орієнтир" == "ориентир".
++        w = w.translate(_FOLD)
++        words.append(w)
++    return " ".join(words)
++
++
++def _same_word(a: str, b: str) -> bool:
++    """Ukrainian and Russian change endings by case ("замок" / "замку", "Ромашка" / "Ромашці").
++    Two words match if they share a long enough beginning."""
++    if a.isdigit() or b.isdigit() or min(len(a), len(b)) <= 3:
++        return a == b
++    common = 0
++    for x, y in zip(a, b):
++        if x != y:
++            break
++        common += 1
++    return common >= max(3, min(len(a), len(b)) - 3)
++
++
++def _match(spoken: str, candidates):
++    """Return the first candidate key that matches the spoken text, exact first, then fuzzy."""
++    key = _norm(spoken)
++    if key in candidates:
++        return key
++    words = key.split()
++    best = None
++    for cand in candidates:
++        cw = cand.split()
++        # The alias may sit inside a longer phrase: "Chateau de Vincennes main gate".
++        for start in range(len(words) - len(cw) + 1):
++            window = words[start:start + len(cw)]
++            if all(_same_word(a, b) for a, b in zip(cw, window)):
++                if best is None or len(cw) > len(best.split()):
++                    best = cand  # prefer the longest (most specific) alias
++                break
++    return best
++
++
++def _load_aliases():
++    table = {}
++    with open(ALIAS_FILE, encoding="utf-8") as f:
++        for row in csv.DictReader(f):
++            table.setdefault(row["area"], {}).setdefault(_norm(row["alias"]), row["osm_name"])
++    return table
++
++
++def load_mission_points(path=MISSION_FILE):
++    """Call again whenever the command post updates the reference list."""
++    points = {}
++    if Path(path).exists():
++        with open(path, encoding="utf-8") as f:
++            for row in csv.DictReader(f):
++                if row["lat"] and row["lon"]:
++                    value = (row["codename"], float(row["lat"]), float(row["lon"]))
++                    names = [row["codename"]] + [n for n in row.get("also_called", "").split(";") if n.strip()]
++                    for name in names:
++                        points[_norm(name.strip())] = value
++    return points
++
++
++_ALIASES = _load_aliases()
++MISSION_POINTS = load_mission_points()
++
++
++def resolve(spoken: str, area: str = "Vincennes", mission_points=None, unit_positions=None) -> dict:
++    """unit_positions: {callsign: (lat, lon, unix_time)} for anything that moves,
++    such as other patrols or a UAV ("300 метрів на північ від Птахи").
++    Feed it from your unit history, or straight from drone telemetry."""
++    if unit_positions:
++        units = {_norm(k): (k, *v) for k, v in unit_positions.items()}
++        hit = _match(spoken, units)
++        if hit:
++            name, lat, lon, ts = units[hit]
++            return {"source": "unit", "name": name, "lat": lat, "lon": lon, "as_of": ts}
++    points = MISSION_POINTS if mission_points is None else mission_points
++    hit = _match(spoken, points)
++    if hit:
++        name, lat, lon = points[hit]
++        return {"source": "mission", "name": name, "lat": lat, "lon": lon}
++    aliases = _ALIASES.get(area, {})
++    hit = _match(spoken, aliases)
++    if hit:
++        return {"source": "alias", "name": aliases[hit]}
++    return {"source": "raw", "name": spoken}
++
++
++def resolve_landmark(spoken: str, area: str = "Vincennes") -> str:
++    """Backwards compatible: just the name to search for."""
++    return resolve(spoken, area)["name"]
++
++
++if __name__ == "__main__":
++    demo_points = {  # dummy coordinates for the self-test only
++        _norm("Ромашка"): ("Ромашка", 48.0, 2.0),
++        _norm("Орієнтир 3"): ("Орієнтир 3", 48.1, 2.1),
++    }
++    tests = [
++        ("Ромашці", "Vincennes"),
++        ("Ромашкой", "Vincennes"),
++        ("орієнтир три", "Vincennes"),
++        ("ориентиру три", "Vincennes"),
++        ("Венсенського замку", "Vincennes"),
++        ("Цветочного парка", "Vincennes"),
++        ("the chateau", "Vincennes"),
++        ("собору", "Bila Tserkva"),
++        ("Торгових рядів", "Bila Tserkva"),
++        ("something unknown", "Vincennes"),
++    ]
++    demo_units = {"Птаха": (48.2, 2.2, 1732120000)}  # a UAV, updated from telemetry
++    tests += [("Птахи", "Vincennes"), ("от Птахи", "Vincennes")]
++    for spoken, area in tests:
++        print(f"{spoken!r:24} -> {resolve(spoken, area, demo_points, demo_units)}")
+diff --git a/backend/services/language/angles.py b/backend/services/language/angles.py
+new file mode 100644
+index 0000000..83f99d5
+--- /dev/null
++++ b/backend/services/language/angles.py
+@@ -0,0 +1,60 @@
++"""Turn spoken directions into a map bearing (degrees clockwise from north).
++
++Soldiers give direction in several systems. Mistral extracts the raw value,
++these functions turn it into a bearing the geometry engine can use.
++
++    clock_to_bearing(3, heading=90)      # "на 3 годині", walking east  -> 180 (south)
++    mils_to_degrees(1500, system="ua")   # "азимут 15-00" (6000 mils)  -> 90
++    mils_to_degrees(1600, system="nato") # 6400 mils                   -> 90
++    words_to_bearing("half right", heading=0) -> 45
++"""
++
++CARDINAL = {
++    "north": 0, "northeast": 45, "east": 90, "southeast": 135,
++    "south": 180, "southwest": 225, "west": 270, "northwest": 315,
++    "північ": 0, "північний схід": 45, "схід": 90, "південний схід": 135,
++    "південь": 180, "південний захід": 225, "захід": 270, "північний захід": 315,
++    "север": 0, "северо-восток": 45, "восток": 90, "юго-восток": 135,
++    "юг": 180, "юго-запад": 225, "запад": 270, "северо-запад": 315,
++}
++
++# Directions relative to the way the speaker is facing or moving.
++RELATIVE = {
++    "ahead": 0, "half right": 45, "right": 90, "behind": 180, "half left": 315, "left": 270,
++    "попереду": 0, "праворуч": 90, "позаду": 180, "ліворуч": 270,
++    "впереди": 0, "справа": 90, "сзади": 180, "слева": 270,
++}
++
++
++def clock_to_bearing(hour: float, heading: float) -> float:
++    """Clock method relative to the speaker: 12 o'clock is straight ahead, each hour is 30 degrees.
++    heading = the direction the speaker faces or moves (from unit history or the last report)."""
++    return (heading + (hour % 12) * 30) % 360
++
++
++def mils_to_degrees(mils: float, system: str = "ua") -> float:
++    """Angular mils. Soviet-legacy kit used by Ukrainian units divides a circle into 6000 (spoken
++    as "15-00" = 1500); NATO uses 6400. Mixing them up gives several degrees of error, which
++    becomes tens of metres at range. Check which system the unit uses."""
++    full_circle = 6000 if system == "ua" else 6400
++    return (mils / full_circle * 360) % 360
++
++
++def words_to_bearing(word: str, heading: float = 0.0):
++    """Cardinal words give an absolute bearing; relative words need the speaker's heading."""
++    w = word.lower().strip()
++    if w in CARDINAL:
++        return CARDINAL[w]
++    if w in RELATIVE:
++        return (heading + RELATIVE[w]) % 360
++    return None
++
++
++if __name__ == "__main__":
++    print("3 o'clock walking east ->", clock_to_bearing(3, heading=90))
++    print("9 o'clock walking north ->", clock_to_bearing(9, heading=0))
++    print("азимут 15-00 (UA 6000) ->", mils_to_degrees(1500, "ua"))
++    print("1600 mils (NATO 6400)  ->", mils_to_degrees(1600, "nato"))
++    print("1500 read as NATO by mistake ->", round(mils_to_degrees(1500, "nato"), 1), "degrees (off by 5.6)")
++    print("half right heading 0   ->", words_to_bearing("half right", 0))
++    print("праворуч heading 180   ->", words_to_bearing("праворуч", 180))
+diff --git a/backend/services/language/check_dataset.py b/backend/services/language/check_dataset.py
+new file mode 100644
+index 0000000..69758fd
+--- /dev/null
++++ b/backend/services/language/check_dataset.py
+@@ -0,0 +1,51 @@
++"""Check the language datasets work together, without any audio or model.
++
++For every call in the test set it asks: if the system extracts the landmark
++correctly, does our alias table / mission points find the right place?
++And for drone calls: does the slang list recognise the drone?
++
++    python check_dataset.py           # uses dummy coordinates for empty mission points
++"""
++import csv
++
++try:
++    from .alias_lookup import MISSION_POINTS, _norm, resolve
++except ImportError:
++    from alias_lookup import MISSION_POINTS, _norm, resolve
++from threat_lookup import resolve_threat
++
++rows = list(csv.DictReader(open("voice_to_map_test_set.csv", encoding="utf-8")))
++
++# If mission points have no coordinates yet, use placeholders so the check can run.
++points = MISSION_POINTS
++if not points:
++    for r in csv.DictReader(open("mission_points.csv", encoding="utf-8")):
++        for name in [r["codename"]] + r["also_called"].split(";"):
++            if name.strip():
++                points[_norm(name.strip())] = (r["codename"], 0.0, 0.0)
++
++ok, problems, skipped = 0, [], 0
++for r in rows:
++    expected = r["landmark_osm_name"]
++    if expected.startswith("(") or expected.startswith("@grid"):
++        skipped += 1  # unit history or grid calls: checked by the pipeline, not here
++        continue
++    spoken_parts = [p.strip() for p in r["expected_landmark_spoken"].replace(" и ", " / ").replace(" і ", " / ").replace(" and ", " / ").split("/")]
++    expected_parts = [p.strip().replace("@mission:", "") for p in expected.split("+")]
++    results = [resolve(p, r["area"], points)["name"] for p in spoken_parts]
++    landmark_ok = all(any(res == exp for res in results) for exp in expected_parts)
++
++    drone_ok = True
++    if r["expected_action"] == "drone_sighting":
++        threat = resolve_threat(r["text_to_read"])
++        drone_ok = threat is not None
++    if landmark_ok and drone_ok:
++        ok += 1
++    else:
++        problems.append((r["id"], r["expected_landmark_spoken"], results, expected,
++                         "" if drone_ok else "drone word not recognised"))
++
++checked = len(rows) - skipped
++print(f"{ok}/{checked} calls resolve correctly ({skipped} skipped: unit history or grid)\n")
++for cid, spoken, got, exp, note in problems:
++    print(f"FAIL {cid}: said {spoken!r} -> got {got}, expected {exp} {note}")
+diff --git a/backend/services/language/evaluate.py b/backend/services/language/evaluate.py
+new file mode 100644
+index 0000000..bf6b3d5
+--- /dev/null
++++ b/backend/services/language/evaluate.py
+@@ -0,0 +1,90 @@
++"""Score the pipeline against the test set and print the numbers for the pitch.
++
++1. Run every recording through the pipeline and save one JSON line per call to
++   predictions.jsonl, for example:
++   {"id": "UA01", "action": "position", "landmark": "Венсенський замок",
++    "relation": "north_of", "distance": 50, "lat": 48.8431, "lon": 2.4359}
++2. python evaluate.py              # practice calls (tune on these)
++   python evaluate.py heldout      # held-out calls: run ONCE on Sunday, the number for the slide
++"""
++import csv
++import json
++import math
++import statistics
++from collections import defaultdict
++
++try:
++    from .alias_lookup import resolve
++except ImportError:
++    from alias_lookup import resolve
++
++
++def haversine_m(lat1, lon1, lat2, lon2):
++    r = 6_371_000
++    p1, p2 = math.radians(lat1), math.radians(lat2)
++    dp, dl = p2 - p1, math.radians(lon2 - lon1)
++    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
++    return 2 * r * math.asin(math.sqrt(a))
++
++
++def landmark_ok(pred_landmark, row):
++    """Correct if the predicted landmark resolves to the same place as the expected one."""
++    if not pred_landmark:
++        return False
++    expected = row["landmark_osm_name"]
++    if expected.startswith("@mission:"):
++        expected = expected.split(":", 1)[1].split(" + ")[0]
++    got = resolve(pred_landmark, row["area"])["name"]
++    return got == expected or expected.startswith("(")  # "(unit history)" etc. not checked here
++
++
++def main(test_file="voice_to_map_test_set.csv", pred_file="predictions.jsonl", split="practice"):
++    truth = {r["id"]: r for r in csv.DictReader(open(test_file, encoding="utf-8"))
++             if split == "all" or r.get("split", "practice") == split}
++    print(f"Scoring {len(truth)} {split} calls\n")
++    preds = {}
++    with open(pred_file, encoding="utf-8") as f:
++        for line in f:
++            if line.strip():
++                p = json.loads(line)
++                preds[p["id"]] = p
++
++    stats = defaultdict(lambda: {"n": 0, "action": 0, "landmark": 0, "relation": 0,
++                                 "distance": 0, "all": 0, "errors": []})
++    for cid, row in truth.items():
++        for group in (row["lang"], "ALL"):
++            s = stats[group]
++            s["n"] += 1
++            p = preds.get(cid)
++            if not p:
++                continue
++            ok = {
++                "action": p.get("action") == row["expected_action"],
++                "landmark": landmark_ok(p.get("landmark"), row),
++                "relation": p.get("relation") == row["relation"],
++                "distance": abs(float(p.get("distance") or 0) - float(row["distance_m"] or 0)) <= 10,
++            }
++            for k, v in ok.items():
++                s[k] += v
++            s["all"] += all(ok.values())
++            if row["true_lat"] and p.get("lat") is not None:
++                s["errors"].append(haversine_m(float(row["true_lat"]), float(row["true_lon"]),
++                                               p["lat"], p["lon"]))
++
++    print(f"{'group':8} {'calls':>5} {'fully ok':>9} {'landmark':>9} {'relation':>9} "
++          f"{'distance':>9} {'median err':>11} {'within 50m':>11}")
++    for group in ["en", "uk", "ru", "mixed", "ALL"]:
++        s = stats.get(group)
++        if not s or not s["n"]:
++            continue
++        pct = lambda k: f"{100 * s[k] / s['n']:.0f}%"
++        errs = s["errors"]
++        med = f"{statistics.median(errs):.0f} m" if errs else "n/a"
++        w50 = f"{100 * sum(e <= 50 for e in errs) / len(errs):.0f}%" if errs else "n/a"
++        print(f"{group:8} {s['n']:>5} {pct('all'):>9} {pct('landmark'):>9} {pct('relation'):>9} "
++              f"{pct('distance'):>9} {med:>11} {w50:>11}")
++
++
++if __name__ == "__main__":
++    import sys
++    main(split=sys.argv[1] if len(sys.argv) > 1 else "practice")
+diff --git a/backend/services/language/fetch_osm_landmarks.py b/backend/services/language/fetch_osm_landmarks.py
+new file mode 100644
+index 0000000..1deeb4b
+--- /dev/null
++++ b/backend/services/language/fetch_osm_landmarks.py
+@@ -0,0 +1,86 @@
++"""Download every named place in the demo areas from OpenStreetMap ONCE,
++save it to landmarks.csv, then run fully offline at the command post.
++
++Run on a laptop with internet (tonight):
++    pip install requests
++    python fetch_osm_landmarks.py
++
++Output: landmarks.csv  (name, name_uk, name_ru, name_en, kind, lat, lon, kind_of_shape, geometry, area)
++geometry is the full outline as JSON [[lat, lon], ...], used by geometry.py.
++The resolver can then look names up locally instead of calling Nominatim.
++"""
++import csv
++import json
++import time
++
++import requests
++
++OVERPASS = "https://overpass-api.de/api/interpreter"
++
++# south, west, north, east  (check these boxes on the map and widen if needed)
++AREAS = {
++    "Vincennes": (48.820, 2.400, 48.860, 2.480),      # town plus Bois de Vincennes
++    "Bila Tserkva": (49.770, 30.060, 49.830, 30.170),  # city centre and park
++}
++
++QUERY = """
++[out:json][timeout:90];
++(
++  node["name"]({s},{w},{n},{e});
++  way["name"]({s},{w},{n},{e});
++  relation["name"]["type"="multipolygon"]({s},{w},{n},{e});
++);
++out geom tags;
++"""
++
++KIND_KEYS = ["amenity", "historic", "leisure", "natural", "building", "railway",
++             "public_transport", "highway", "tourism", "landuse", "waterway", "man_made"]
++
++
++def fetch(area, box):
++    s, w, n, e = box
++    r = requests.post(OVERPASS, data={"data": QUERY.format(s=s, w=w, n=n, e=e)}, timeout=120)
++    r.raise_for_status()
++    rows = []
++    for el in r.json()["elements"]:
++        tags = el.get("tags", {})
++        # Keep the full shape, not just one point: big places need their edges.
++        if el["type"] == "node":
++            coords, kind = [(el["lat"], el["lon"])], "point"
++        elif "geometry" in el:
++            coords = [(g["lat"], g["lon"]) for g in el["geometry"]]
++            kind = "polygon" if len(coords) > 3 and coords[0] == coords[-1] else "line"
++        else:
++            continue  # relations without simple geometry are skipped for the demo
++        lat = sum(c[0] for c in coords) / len(coords)
++        lon = sum(c[1] for c in coords) / len(coords)
++        kind = next((f"{k}={tags[k]}" for k in KIND_KEYS if k in tags), "other")
++        rows.append({
++            "name": tags.get("name", ""),
++            "name_uk": tags.get("name:uk", ""),
++            "name_ru": tags.get("name:ru", ""),
++            "name_en": tags.get("name:en", ""),
++            "kind": kind,
++            "lat": round(lat, 6),
++            "lon": round(lon, 6),
++            "kind_of_shape": kind,
++            "geometry": json.dumps([[round(a, 6), round(b, 6)] for a, b in coords]),
++            "area": area,
++        })
++    return rows
++
++
++if __name__ == "__main__":
++    all_rows = []
++    for area, box in AREAS.items():
++        rows = fetch(area, box)
++        print(f"{area}: {len(rows)} named places "
++              f"({sum(1 for r in rows if r['name_uk'])} with a Ukrainian name, "
++              f"{sum(1 for r in rows if r['name_ru'])} with a Russian name)")
++        all_rows += rows
++        time.sleep(5)  # be polite to the public Overpass server
++    with open("landmarks.csv", "w", newline="", encoding="utf-8") as f:
++        writer = csv.DictWriter(f, fieldnames=list(all_rows[0].keys()))
++        writer.writeheader()
++        writer.writerows(all_rows)
++    print("Saved landmarks.csv")
+diff --git a/backend/services/language/fuse.py b/backend/services/language/fuse.py
+new file mode 100644
+index 0000000..574f8cb
+--- /dev/null
++++ b/backend/services/language/fuse.py
+@@ -0,0 +1,173 @@
++"""Merge reports of the same enemy / drone from different units into one marker.
++
++Rule of thumb, as a commander would apply it:
++  Two reports are the SAME thing if
++    1. they are the same kind of thing (an FPV and a "drone" can match; an FPV and a Shahed cannot),
++    2. they came close in time (drones move fast, so their window is short),
++    3. they are close enough in place, allowing for each report's uncertainty
++       and for how far the thing could have moved in between.
++  Then: combine the positions (more precise report counts more), shrink the circle,
++  and record both sources. Two independent units seeing it = higher confidence.
++
++  Two identical drones close together (the dangerous case: merging them would make
++  the commander underestimate the threat). When unsure, KEEP THEM SEPARATE:
++    A. Counts: "два ждуни" -> count=2. A marker keeps the HIGHEST count any single
++       unit reported, so "Сокіл: два" + "Граніт: один" = at least 2, never 1.
++    B. "ще один / ещё один / another / другий" -> always a new marker, never an update.
++    C. Only clear matches merge. Borderline matches get their own marker, flagged
++       "possibly the same as #N", and the operator decides with one click.
++
++    from fuse import SightingFuser
++    f = SightingFuser()
++    f.add(reporter="Сокіл", category="fpv_ambush", lat=..., lon=..., uncertainty_m=40, t=1000)
++    f.markers()   # what the map should draw
++"""
++import math
++from dataclasses import dataclass, field
++
++# How fast each kind of thing can move (m/s) and how long a report stays "fresh" (s).
++PROFILES = {
++    "fpv":               (30, 90),
++    "fpv_fiber":         (25, 90),
++    "fpv_ambush":        (0.5, 1800),   # sits on the ground waiting
++    "recon_quad":        (15, 300),
++    "recon_fixed_wing":  (30, 300),
++    "loitering_munition": (40, 120),
++    "attack_fixed_wing": (30, 120),
++    "long_range_strike": (50, 120),
++    "bomber":            (15, 300),
++    "uav":               (25, 180),     # "пташка": type unknown
++    "infantry":          (2, 900),
++    "vehicle":           (15, 600),
++}
++
++# Which categories may be the same object (a vague report can match a specific one).
++COMPATIBLE = {
++    "uav": {"fpv", "fpv_fiber", "recon_quad", "bomber", "recon_fixed_wing", "uav"},
++    "fpv": {"fpv", "fpv_fiber", "uav"},
++    "fpv_fiber": {"fpv_fiber", "fpv", "uav"},
++}
++
++
++def _dist_m(lat1, lon1, lat2, lon2):
++    kx = 111_320 * math.cos(math.radians((lat1 + lat2) / 2))
++    return math.hypot((lon2 - lon1) * kx, (lat2 - lat1) * 110_540)
++
++
++def _compatible(a, b):
++    return a == b or b in COMPATIBLE.get(a, set()) or a in COMPATIBLE.get(b, set())
++
++
++MERGE_THRESHOLD = 0.5   # merge only if distance is under half of what is allowed
++
++
++@dataclass
++class Marker:
++    id: int
++    category: str
++    lat: float
++    lon: float
++    uncertainty_m: float
++    t_first: float
++    t_last: float
++    sources: list = field(default_factory=list)   # (reporter, time)
++    count: int = 1                                # how many objects (highest single report)
++    possibly_same_as: list = field(default_factory=list)
++
++    @property
++    def confidence(self):
++        n = len({r for r, _ in self.sources})
++        text = {1: "single report", 2: "confirmed by 2 units"}.get(n, f"confirmed by {n} units")
++        if self.possibly_same_as:
++            text += f", possibly same as #{', #'.join(map(str, self.possibly_same_as))}"
++        return text
++
++
++class SightingFuser:
++    def __init__(self):
++        self._markers: list[Marker] = []
++
++    def add(self, reporter, category, lat, lon, uncertainty_m, t, count=1, another=False):
++        """count: number of objects in this report ("два ждуни" -> 2).
++        another: the speaker said "ще один / ещё один / another"."""
++        best, best_score, borderline = None, None, []
++        for m in self._markers:
++            if not _compatible(m.category, category):
++                continue
++            speed, window = PROFILES.get(category, PROFILES["uav"])
++            dt = t - m.t_last
++            if dt < 0 or dt > window:
++                continue
++            allowed = m.uncertainty_m + uncertainty_m + speed * dt
++            d = _dist_m(m.lat, m.lon, lat, lon)
++            if d <= allowed:
++                score = d / allowed
++                if score <= MERGE_THRESHOLD and not another:
++                    if best_score is None or score < best_score:
++                        best, best_score = m, score
++                else:
++                    borderline.append(m.id)
++        if best is None:
++            m = Marker(len(self._markers) + 1, category, lat, lon, uncertainty_m, t, t,
++                       [(reporter, t)], count=count, possibly_same_as=[] if another else borderline)
++            self._markers.append(m)
++            if another:
++                return m, "new marker (speaker said 'another')"
++            return m, "new marker, flagged as possibly the same" if borderline else "new marker"
++
++        # Combine: the more precise report weighs more (inverse-variance weighting).
++        speed, _ = PROFILES.get(category, PROFILES["uav"])
++        old_u = best.uncertainty_m + speed * (t - best.t_last)  # older report has aged
++        w_old, w_new = 1 / old_u ** 2, 1 / uncertainty_m ** 2
++        best.lat = (best.lat * w_old + lat * w_new) / (w_old + w_new)
++        best.lon = (best.lon * w_old + lon * w_new) / (w_old + w_new)
++        best.uncertainty_m = 1 / math.sqrt(w_old + w_new)
++        best.t_last = t
++        # Keep the more specific type ("пташка" + "FPV" -> FPV).
++        if best.category == "uav" and category != "uav":
++            best.category = category
++        best.sources.append((reporter, t))
++        best.count = max(best.count, count)
++        same_reporter = any(r == reporter for r, _ in best.sources[:-1])
++        return best, "updated by same unit" if same_reporter else "merged with another unit's report"
++
++    def markers(self, now=None):
++        out = []
++        for m in self._markers:
++            if now is not None:
++                _, window = PROFILES.get(m.category, PROFILES["uav"])
++                if now - m.t_last > window:
++                    continue  # stale: stop drawing (or grey it out)
++            out.append(m)
++        return out
++
++
++if __name__ == "__main__":
++    f = SightingFuser()
++    lat0, lon0 = 48.8400, 2.4350
++    m_north = 1 / 110_540
++
++    steps = [
++        dict(reporter="Сокіл", category="fpv_ambush", lat=lat0, lon=lon0, uncertainty_m=40, t=1000),
++        dict(reporter="Граніт", category="fpv_ambush", lat=lat0 + 20 * m_north, lon=lon0, uncertainty_m=30, t=1030),
++        dict(reporter="Сокіл", category="fpv_ambush", lat=lat0 + 30 * m_north, lon=lon0, uncertainty_m=40, t=1050, another=True),
++        dict(reporter="Лис", category="fpv_ambush", lat=lat0 + 90 * m_north, lon=lon0, uncertainty_m=40, t=1060),
++        dict(reporter="Граніт", category="recon_quad", lat=lat0 + 500 * m_north, lon=lon0, uncertainty_m=50, t=1100, count=2),
++        dict(reporter="Лис", category="recon_quad", lat=lat0 + 510 * m_north, lon=lon0, uncertainty_m=50, t=1110, count=1),
++    ]
++    labels = [
++        "Сокіл: ждун near the barn",
++        "Граніт, 30 s later, 20 m away: clearly the same ждун",
++        "Сокіл: 'ще один ждун', 30 m away",
++        "Лис: a ждун 90 m away (borderline)",
++        "Граніт: 'два мавіки' 500 m north",
++        "Лис: 'мавік' there, 10 s later",
++    ]
++    for label, step in zip(labels, steps):
++        m, what = f.add(**step)
++        print(f"{label:52} -> #{m.id} {what}")
++
++    print("\nMap shows:")
++    for m in f.markers(now=1120):
++        print(f"  #{m.id} {m.category:12} x{m.count}  ±{m.uncertainty_m:3.0f} m  {m.confidence:40} "
++              f"sources: {', '.join(r for r, _ in m.sources)}")
+diff --git a/backend/services/language/geometry.py b/backend/services/language/geometry.py
+new file mode 100644
+index 0000000..0869131
+--- /dev/null
++++ b/backend/services/language/geometry.py
+@@ -0,0 +1,123 @@
++"""Place a report correctly when the landmark is big (a forest, a lake) or long (a tree line, a road).
++
++The common mistake: "50 m north of the forest" computed from the forest's CENTRE,
++which can be a kilometre off. Instead:
++
++  * "north of X"  -> start from the edge of X on its north side, then go 50 m north.
++  * "in / at X"   -> if we know where the unit was, the point of X closest to it;
++                     otherwise X's centre, with an uncertainty circle as big as X.
++  * long things   -> same rules: a tree line is treated as a line, not a dot.
++
++Every result carries an uncertainty radius in metres, so the map draws a circle,
++not a falsely precise pin.
++
++    pip install shapely
++    from geometry import place_report
++    place_report(shape, relation="north_of", distance_m=50, last_position=(lat, lon))
++"""
++import math
++
++from shapely.geometry import LineString, Point, Polygon
++from shapely.ops import nearest_points
++
++BEARINGS = {"north_of": 0, "northeast_of": 45, "east_of": 90, "southeast_of": 135,
++            "south_of": 180, "southwest_of": 225, "west_of": 270, "northwest_of": 315}
++
++
++class LocalMetres:
++    """Flat x/y in metres around a reference point. Accurate enough within a few km."""
++
++    def __init__(self, lat0, lon0):
++        self.lat0, self.lon0 = lat0, lon0
++        self.kx = 111_320 * math.cos(math.radians(lat0))
++        self.ky = 110_540
++
++    def to_xy(self, lat, lon):
++        return ((lon - self.lon0) * self.kx, (lat - self.lat0) * self.ky)
++
++    def to_latlon(self, x, y):
++        return (self.lat0 + y / self.ky, self.lon0 + x / self.kx)
++
++
++def _shape_to_xy(coords, frame, kind):
++    pts = [frame.to_xy(lat, lon) for lat, lon in coords]
++    if kind == "point":
++        return Point(pts[0])
++    if kind == "line":
++        return LineString(pts)
++    return Polygon(pts)
++
++
++def size_m(shape) -> float:
++    """Rough size of a place: half its longest side, used as uncertainty."""
++    minx, miny, maxx, maxy = shape.bounds
++    return max(maxx - minx, maxy - miny) / 2
++
++
++def place_report(coords, kind, relation, distance_m=0, last_position=None,
++                 vague=False, bearing_deg=None):
++    """coords: list of (lat, lon); kind: 'point' | 'line' | 'polygon'.
++    relation can also be "bearing" with bearing_deg (from angles.py: clock, mils, half right).
++    Returns {'lat', 'lon', 'uncertainty_m', 'method'}."""
++    lat0, lon0 = coords[0]
++    frame = LocalMetres(lat0, lon0)
++    shape = _shape_to_xy(coords, frame, kind)
++    last_xy = Point(frame.to_xy(*last_position)) if last_position else None
++    base_uncertainty = 10.0
++
++    angle = bearing_deg if relation == "bearing" and bearing_deg is not None else BEARINGS.get(relation)
++    if angle is not None:
++        b = math.radians(angle)
++        dx, dy = math.sin(b), math.cos(b)
++        if kind == "point":
++            start, method = shape, "offset from point"
++        else:
++            # Edge point furthest in the requested direction.
++            boundary = shape if kind == "line" else shape.exterior
++            pts = [Point(c) for c in boundary.coords]
++            start = max(pts, key=lambda p: p.x * dx + p.y * dy)
++            method = "offset from the edge on that side"
++            if last_xy is not None:
++                # Prefer the edge point near the unit, if it is on the correct side.
++                near = nearest_points(boundary, last_xy)[0]
++                if (near.x - shape.centroid.x) * dx + (near.y - shape.centroid.y) * dy > 0:
++                    start, method = near, "offset from the edge nearest the unit"
++        x, y = start.x + dx * distance_m, start.y + dy * distance_m
++        uncertainty = base_uncertainty + 0.15 * distance_m
++        if kind != "point" and last_xy is None:
++            uncertainty += size_m(shape) * 0.3  # we don't know where along the edge
++    else:  # at / in / near / behind and unknown relations
++        if last_xy is not None and kind != "point":
++            p = nearest_points(shape if kind == "line" else shape.exterior, last_xy)[0]
++            x, y = p.x, p.y
++            uncertainty, method = base_uncertainty + 20, "closest part to the unit's last position"
++        else:
++            c = shape.centroid
++            x, y = c.x, c.y
++            uncertainty = base_uncertainty + (size_m(shape) if kind != "point" else 0)
++            method = "centre of the place, circle as big as the place"
++        if relation == "near":
++            uncertainty += 30
++
++    if vague:  # "метрів сто", "близько", "трохи далі"
++        uncertainty *= 1.5
++    lat, lon = frame.to_latlon(x, y)
++    return {"lat": round(lat, 6), "lon": round(lon, 6),
++            "uncertainty_m": round(uncertainty), "method": method}
++
++
++if __name__ == "__main__":
++    # A made-up 1 km x 600 m forest, and a 400 m tree line, for the self-test.
++    forest = [(48.830, 2.430), (48.830, 2.444), (48.8354, 2.444), (48.8354, 2.430), (48.830, 2.430)]
++    tree_line = [(48.840, 2.430), (48.840, 2.4355)]
++    centre_lat = (48.830 + 48.8354) / 2
++
++    r = place_report(forest, "polygon", "north_of", 50)
++    print("50 m north of forest       ->", r)
++    print("   the naive centre method would put it", round((48.8354 - centre_lat) * 110540), "m too far south")
++    print("north of forest, unit known ->", place_report(forest, "polygon", "north_of", 50,
++                                                          last_position=(48.8370, 2.4420)))
++    print("in the forest, unit unknown ->", place_report(forest, "polygon", "at"))
++    print("in the tree line, unit known->", place_report(tree_line, "line", "at",
++                                                          last_position=(48.8395, 2.4350)))
++    print("vague 'метрів сто' east     ->", place_report(tree_line, "line", "east_of", 100, vague=True))
+diff --git a/backend/services/language/landmark_aliases.csv b/backend/services/language/landmark_aliases.csv
+new file mode 100644
+index 0000000..42105e9
+--- /dev/null
++++ b/backend/services/language/landmark_aliases.csv
+@@ -0,0 +1,68 @@
++alias,lang,osm_name,area,kind,notes
++Chateau de Vincennes,en,Château de Vincennes,Vincennes,castle,
++the chateau,en,Château de Vincennes,Vincennes,castle,short form
++chateau,en,Château de Vincennes,Vincennes,castle,short form
++the castle,en,Château de Vincennes,Vincennes,castle,
++the fort,en,Château de Vincennes,Vincennes,castle,soldiers may call it a fort
++Венсенський замок,uk,Château de Vincennes,Vincennes,castle,
++замок,uk,Château de Vincennes,Vincennes,castle,short form
++фортеця,uk,Château de Vincennes,Vincennes,castle,
++Венсенский замок,ru,Château de Vincennes,Vincennes,castle,
++замок,ru,Château de Vincennes,Vincennes,castle,short form
++крепость,ru,Château de Vincennes,Vincennes,castle,
++town hall,en,Hôtel de Ville de Vincennes,Vincennes,town_hall,
++city hall,en,Hôtel de Ville de Vincennes,Vincennes,town_hall,
++ратуша,uk,Hôtel de Ville de Vincennes,Vincennes,town_hall,
++мерія,uk,Hôtel de Ville de Vincennes,Vincennes,town_hall,
++мэрия,ru,Hôtel de Ville de Vincennes,Vincennes,town_hall,
++ратуша,ru,Hôtel de Ville de Vincennes,Vincennes,town_hall,
++the church,en,Église Notre-Dame de Vincennes,Vincennes,church,ambiguous: resolve using unit history
++церква,uk,Église Notre-Dame de Vincennes,Vincennes,church,ambiguous
++церковь,ru,Église Notre-Dame de Vincennes,Vincennes,church,ambiguous
++RER station,en,Vincennes (RER A),Vincennes,station,
++the station,en,Vincennes (RER A),Vincennes,station,
++вокзал,uk,Vincennes (RER A),Vincennes,station,in Vincennes area only
++станція,uk,Vincennes (RER A),Vincennes,station,
++вокзал,ru,Vincennes (RER A),Vincennes,station,in Vincennes area only
++станция,ru,Vincennes (RER A),Vincennes,station,
++Lac des Minimes,en,Lac des Minimes,Vincennes,lake,
++озеро Мінім,uk,Lac des Minimes,Vincennes,lake,
++озеро Миним,ru,Lac des Minimes,Vincennes,lake,
++Lac Daumesnil,en,Lac Daumesnil,Vincennes,lake,
++озеро Доменіль,uk,Lac Daumesnil,Vincennes,lake,
++озеро Домениль,ru,Lac Daumesnil,Vincennes,lake,
++the lake,en,Lac Daumesnil,Vincennes,lake,ambiguous: two lakes in the area
++озеро,uk,Lac Daumesnil,Vincennes,lake,ambiguous
++озеро,ru,Lac Daumesnil,Vincennes,lake,ambiguous
++Parc Floral,en,Parc Floral de Paris,Vincennes,park,
++flower park,en,Parc Floral de Paris,Vincennes,park,
++Квітковий парк,uk,Parc Floral de Paris,Vincennes,park,
++Цветочный парк,ru,Parc Floral de Paris,Vincennes,park,
++Hippodrome,en,Hippodrome de Paris-Vincennes,Vincennes,racecourse,
++racecourse,en,Hippodrome de Paris-Vincennes,Vincennes,racecourse,
++іподром,uk,Hippodrome de Paris-Vincennes,Vincennes,racecourse,
++ипподром,ru,Hippodrome de Paris-Vincennes,Vincennes,racecourse,
++the zoo,en,Parc zoologique de Paris,Vincennes,zoo,
++zoo,en,Parc zoologique de Paris,Vincennes,zoo,
++зоопарк,uk,Parc zoologique de Paris,Vincennes,zoo,
++зоопарк,ru,Parc zoologique de Paris,Vincennes,zoo,
++Avenue de Paris,en,Avenue de Paris,Vincennes,street,
++авеню де Парі,uk,Avenue de Paris,Vincennes,street,phonetic
++Паризький проспект,uk,Avenue de Paris,Vincennes,street,translated
++Торгові ряди,uk,Торгові ряди,Bila Tserkva,market_hall,
++ряди,uk,Торгові ряди,Bila Tserkva,market_hall,short form
++Торговые ряды,ru,Торгові ряди,Bila Tserkva,market_hall,
++Trade Rows,en,Торгові ряди,Bila Tserkva,market_hall,
++Преображенський собор,uk,Спасо-Преображенський собор,Bila Tserkva,cathedral,
++собор,uk,Спасо-Преображенський собор,Bila Tserkva,cathedral,short form
++Преображенский собор,ru,Спасо-Преображенський собор,Bila Tserkva,cathedral,
++собор,ru,Спасо-Преображенський собор,Bila Tserkva,cathedral,short form
++the cathedral,en,Спасо-Преображенський собор,Bila Tserkva,cathedral,
++Олександрія,uk,Дендропарк Олександрія,Bila Tserkva,park,
++дендропарк,uk,Дендропарк Олександрія,Bila Tserkva,park,
++Александрия,ru,Дендропарк Олександрія,Bila Tserkva,park,
++Oleksandriia park,en,Дендропарк Олександрія,Bila Tserkva,park,
++вокзал,uk,Біла Церква (залізнична станція),Bila Tserkva,station,in Bila Tserkva area only
++вокзал,ru,Біла Церква (залізнична станція),Bila Tserkva,station,in Bila Tserkva area only
++міст через Рось,uk,(bridge over Рось),Bila Tserkva,bridge,check exact OSM bridge name
++мост через Рось,ru,(bridge over Рось),Bila Tserkva,bridge,check exact OSM bridge name
+diff --git a/backend/services/language/mission_points.csv b/backend/services/language/mission_points.csv
+new file mode 100644
+index 0000000..03f6786
+--- /dev/null
++++ b/backend/services/language/mission_points.csv
+@@ -0,0 +1,5 @@
++codename,also_called,lat,lon,notes
++Ромашка,Ромашка,48.83900,2.44700,DEMO point in the Bois de Vincennes: move it on the map before the demo if you like
++Сарай,Сарай,48.83600,2.45200,DEMO point
++Орієнтир 3,Ориентир 3,48.83300,2.44800,DEMO point
++Друга посадка,Вторая посадка; Другая посадка,48.83500,2.44200,DEMO point (a tree line; middle point)
+diff --git a/backend/services/language/radio_effect.py b/backend/services/language/radio_effect.py
+new file mode 100644
+index 0000000..b5320bf
+--- /dev/null
++++ b/backend/services/language/radio_effect.py
+@@ -0,0 +1,87 @@
++"""Make clean phone recordings sound like a tactical radio, so the test is honest.
++
++What it adds, like a real handheld net:
++  * narrow radio band (about 300 to 3000 Hz): voices sound thin and boxy
++  * light distortion from an overdriven mic
++  * background hiss, plus optional wind / engine rumble
++  * squelch: a short burst of static at the start and end of the transmission
++  * level "bad": stronger noise and a few dropouts, like a weak signal
++
++Usage (needs ffmpeg for .m4a / .mp3 input; .wav works without it):
++    pip install numpy scipy
++    python radio_effect.py recordings/            # writes recordings_radio/<name>_good.wav and _bad.wav
++    python radio_effect.py UA01.m4a               # one file
++
++Score the pipeline on both: clean, radio "good", radio "bad".
++The drop in accuracy between them is a useful honest number for the pitch.
++"""
++import subprocess
++import sys
++import tempfile
++from pathlib import Path
++
++import numpy as np
++from scipy.io import wavfile
++from scipy.signal import butter, sosfilt
++
++SR = 16_000  # Whisper works at 16 kHz
++
++
++def load(path: Path) -> np.ndarray:
++    """Any audio file -> mono float32 at 16 kHz."""
++    with tempfile.NamedTemporaryFile(suffix=".wav") as tmp:
++        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
++                        "-ac", "1", "-ar", str(SR), tmp.name], check=True)
++        _, data = wavfile.read(tmp.name)
++    data = data.astype(np.float32)
++    return data / (np.max(np.abs(data)) + 1e-9)
++
++
++def bandpass(x, lo=300, hi=3000):
++    return sosfilt(butter(6, [lo, hi], btype="band", fs=SR, output="sos"), x)
++
++
++def lowpass(x, cutoff):
++    return sosfilt(butter(4, cutoff, btype="low", fs=SR, output="sos"), x)
++
++
++def squelch(rng, seconds=0.15, level=0.5):
++    n = int(SR * seconds)
++    burst = rng.normal(0, level, n) * np.linspace(1, 0, n)
++    return bandpass(burst, 500, 3000)
++
++
++def radio(x, quality="good", wind=True, seed=0):
++    rng = np.random.default_rng(seed)
++    noise_level = 0.03 if quality == "good" else 0.10
++
++    y = bandpass(x)
++    y = np.tanh(3.0 * y) / np.tanh(3.0)                      # overdriven mic
++    y = y + rng.normal(0, noise_level, len(y))                # hiss
++    if wind:
++        rumble = lowpass(rng.normal(0, 1, len(y)), 200)
++        y = y + 0.6 * noise_level * rumble / (np.max(np.abs(rumble)) + 1e-9) * 3
++    if quality == "bad":                                      # weak signal: short dropouts
++        for _ in range(max(1, len(y) // (SR * 2))):
++            start = rng.integers(0, max(1, len(y) - SR // 5))
++            y[start:start + rng.integers(SR // 20, SR // 6)] *= 0.05
++    y = np.concatenate([squelch(rng), y, squelch(rng, 0.1)])  # PTT click on and off
++    return (y / (np.max(np.abs(y)) + 1e-9) * 0.9).astype(np.float32)
++
++
++def process(path: Path, out_dir: Path):
++    x = load(path)
++    out_dir.mkdir(parents=True, exist_ok=True)
++    for quality in ("good", "bad"):
++        out = out_dir / f"{path.stem}_{quality}.wav"
++        wavfile.write(out, SR, (radio(x, quality) * 32767).astype(np.int16))
++        print("wrote", out)
++
++
++if __name__ == "__main__":
++    target = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
++    exts = {".wav", ".m4a", ".mp3", ".ogg", ".opus", ".aac", ".flac"}
++    files = [target] if target.is_file() else sorted(p for p in target.iterdir() if p.suffix.lower() in exts)
++    out_dir = (target.parent if target.is_file() else target.parent) / f"{target.stem}_radio"
++    for f in files:
++        process(f, out_dir)
+diff --git a/backend/services/language/threat_lookup.py b/backend/services/language/threat_lookup.py
+new file mode 100644
+index 0000000..8b046ec
+--- /dev/null
++++ b/backend/services/language/threat_lookup.py
+@@ -0,0 +1,41 @@
++"""Turn drone and threat slang into a standard type for the map icon.
++
++    from threat_lookup import resolve_threat
++    resolve_threat("ждун")        # {'type': 'FPV drone waiting on the ground (ambush)', 'category': 'fpv_ambush', ...}
++    resolve_threat("фпв на оптиці")  # longest match wins -> fiber-optic FPV
++"""
++import csv
++from pathlib import Path
++
++try:
++    from .alias_lookup import _match, _norm
++except ImportError:
++    from alias_lookup import _match, _norm
++
++VOCAB_FILE = Path(__file__).with_name("threat_vocab.csv")
++
++
++def _load():
++    vocab = {}
++    with open(VOCAB_FILE, encoding="utf-8") as f:
++        for row in csv.DictReader(f):
++            vocab.setdefault(_norm(row["spoken"]), row)
++    return vocab
++
++
++VOCAB = _load()
++
++
++def resolve_threat(text: str):
++    hit = _match(text, VOCAB)
++    if not hit:
++        return None
++    row = VOCAB[hit]
++    return {"type": row["canonical_type"], "category": row["category"],
++            "matched": row["spoken"], "verified": row["source_status"] == "sourced"}
++
++
++if __name__ == "__main__":
++    for t in ["пташка над Ромашкою", "ждун біля Сараю", "орлан кружит", "фпв на оптиці",
++              "мавік висить", "мопед пройшов", "Баба Яга", "ланцета", "нічого"]:
++        print(f"{t!r:24} -> {resolve_threat(t)}")
+diff --git a/backend/services/language/threat_vocab.csv b/backend/services/language/threat_vocab.csv
+new file mode 100644
+index 0000000..e020a44
+--- /dev/null
++++ b/backend/services/language/threat_vocab.csv
+@@ -0,0 +1,39 @@
++spoken,lang,canonical_type,category,source_status,notes
++пташка,uk,drone (generic),uav,sourced,generic word for any drone
++птичка,ru,drone (generic),uav,sourced,generic word for any drone
++птаха,uk,drone (generic),uav,check,variant of пташка
++мопед,uk,Shahed / Geran long-range strike drone,long_range_strike,sourced,named for its engine sound
++мопед,ru,Shahed / Geran long-range strike drone,long_range_strike,sourced,
++шахед,uk,Shahed / Geran long-range strike drone,long_range_strike,sourced,
++шахед,ru,Shahed / Geran long-range strike drone,long_range_strike,sourced,
++герань,ru,Shahed / Geran long-range strike drone,long_range_strike,sourced,Russian official name
++баба яга,uk,heavy bomber multicopter,bomber,sourced,large hexacopter bomber (Ukrainian side)
++баба яга,ru,heavy bomber multicopter,bomber,sourced,
++вампір,uk,heavy bomber multicopter,bomber,sourced,Vampire bomber drone
++вампир,ru,heavy bomber multicopter,bomber,sourced,
++фпв,uk,FPV attack drone,fpv,check,also spoken as фпвшка
++фпвшка,uk,FPV attack drone,fpv,check,
++фпвишка,ru,FPV attack drone,fpv,check,
++камікадзе,uk,FPV attack drone,fpv,check,
++оптоволокно,uk,fiber-optic FPV drone,fpv_fiber,sourced,cannot be jammed; often said as на оптиці
++на оптиці,uk,fiber-optic FPV drone,fpv_fiber,check,
++оптоволокно,ru,fiber-optic FPV drone,fpv_fiber,sourced,
++на оптике,ru,fiber-optic FPV drone,fpv_fiber,check,
++ждун,uk,FPV drone waiting on the ground (ambush),fpv_ambush,check,lands and waits for a target
++ждун,ru,FPV drone waiting on the ground (ambush),fpv_ambush,check,
++мавік,uk,quadcopter recon drone (Mavic class),recon_quad,check,brand name used generically
++мавик,ru,quadcopter recon drone (Mavic class),recon_quad,check,
++орлан,uk,Orlan fixed-wing recon drone,recon_fixed_wing,sourced,spots for artillery and Lancets
++орлан,ru,Orlan fixed-wing recon drone,recon_fixed_wing,sourced,
++зала,uk,ZALA fixed-wing recon drone,recon_fixed_wing,check,
++суперкам,uk,Supercam fixed-wing recon drone,recon_fixed_wing,check,
++крило,uk,fixed-wing drone (generic),recon_fixed_wing,check,generic word for any winged drone
++крыло,ru,fixed-wing drone (generic),recon_fixed_wing,check,
++ланцет,uk,Lancet loitering munition,loitering_munition,sourced,
++ланцет,ru,Lancet loitering munition,loitering_munition,sourced,
++молнія,uk,Molniya fixed-wing attack drone,attack_fixed_wing,sourced,
++молния,ru,Molniya fixed-wing attack drone,attack_fixed_wing,sourced,
++гербера,uk,Gerbera decoy drone,decoy,check,cheap Shahed decoy
++гербера,ru,Gerbera decoy drone,decoy,check,
++каб,uk,guided glide bomb (KAB),glide_bomb,check,not a drone but reported the same way
++каб,ru,guided glide bomb (KAB),glide_bomb,check,
+diff --git a/backend/services/language/voice_to_map_test_set.csv b/backend/services/language/voice_to_map_test_set.csv
+new file mode 100644
+index 0000000..d7acf5e
+--- /dev/null
++++ b/backend/services/language/voice_to_map_test_set.csv
+@@ -0,0 +1,59 @@
++id,split,lang,area,difficulty,speaker_callsign,text_to_read,expected_action,expected_landmark_spoken,landmark_osm_name,relation,distance_m,what_it_tests,audio_file,true_lat,true_lon
++EN01,practice,en,Vincennes,easy,Viper 2,"Hawk, this is Viper 2, in position 50 metres north of the Chateau de Vincennes main gate, over.",position,Chateau de Vincennes main gate,Château de Vincennes,north_of,50,baseline cardinal offset,EN01.wav,,
++EN02,practice,en,Vincennes,easy,Viper 2,"Hawk, Viper 2, moving to Vincennes town hall, figures two minutes, over.",moving,Vincennes town hall,Hôtel de Ville de Vincennes,at,0,movement plus ETA with no offset,EN02.wav,,
++EN03,practice,en,Vincennes,medium,Viper 3,"Hawk, Viper 3, contact, 200 metres east of Lac des Minimes, three dismounts moving south, over.",contact,Lac des Minimes,Lac des Minimes,east_of,200,contact report with size and direction of movement,EN03.wav,,
++EN04,practice,en,Vincennes,hard,Viper 2,"Hawk, Viper 2, I'm behind the church, east side, over.",position,the church,Église Notre-Dame de Vincennes,east_of,20,ambiguous landmark resolved from unit history,EN04.wav,,
++EN05,heldout,en,Vincennes,easy,Viper 1,"Hawk, Viper 1, halted at Vincennes RER station, over.",halted,Vincennes RER station,Vincennes (RER A),at,0,transport landmark,EN05.wav,,
++EN06,practice,en,Vincennes,hard,Viper 3,"Hawk, Viper 3, correction, correction, not the lake. I say again, 100 metres south of the Parc Floral entrance, over.",position,Parc Floral entrance,Parc Floral de Paris,south_of,100,correction must override first landmark,EN06.wav,,
++EN07,practice,en,Vincennes,medium,Viper 2,"Hawk, Viper 2, crossing Avenue de Paris now, heading for the chateau, over.",moving,Avenue de Paris,Avenue de Paris,on,0,street as landmark plus heading,EN07.wav,,
++EN08,heldout,en,Vincennes,medium,Viper 1,"Hawk, Viper 1, observing from 300 metres west of the Hippodrome stands, over.",observing,Hippodrome stands,Hippodrome de Paris-Vincennes,west_of,300,longer distance,EN08.wav,,
++EN09,heldout,en,Vincennes,hard,Viper 3,Hawk... Viper 3... between the zoo and Lac Daumesnil... over.,position,zoo and Lac Daumesnil,Parc zoologique de Paris + Lac Daumesnil,between,0,broken transmission and midpoint between two landmarks (record with wind noise),EN09.wav,,
++EN10,practice,en,Vincennes,hard,Viper 2,"Hawk, Viper 2, same position as last report, nothing to report, over.",position,last report,(unit history),same_as_last,0,must reuse previous position from history,EN10.wav,,
++UA01,practice,uk,Vincennes,easy,Сокіл,"Вежа, я Сокіл, на позиції, 50 метрів на північ від Венсенського замку, прийом.",position,Венсенський замок,Château de Vincennes,north_of,50,Ukrainian name for a French landmark (needs alias table),UA01.wav,,
++UA02,practice,uk,Vincennes,easy,Сокіл,"Вежа, я Сокіл, рухаюсь до ратуші, буду за дві хвилини, прийом.",moving,ратуша,Hôtel de Ville de Vincennes,at,0,translated landmark plus ETA,UA02.wav,,
++UA03,practice,uk,Vincennes,medium,Граніт,"Вежа, я Граніт, бачу трьох, двісті метрів на схід від озера Мінім, рухаються на південь, прийом.",contact,озеро Мінім,Lac des Minimes,east_of,200,number spoken as a word,UA03.wav,,
++UA04,practice,uk,Vincennes,hard,Лис,"Вежа, я Лис, за церквою, зі східного боку, прийом.",position,церква,Église Notre-Dame de Vincennes,east_of,20,ambiguous church in Ukrainian,UA04.wav,,
++UA05,practice,uk,Vincennes,hard,Граніт,"Вежа, я Граніт, мінус, мінус, не озеро. Сто метрів на південь від входу в Квітковий парк, прийом.",position,Квітковий парк,Parc Floral de Paris,south_of,100,Ukrainian correction words (мінус) plus translated park name,UA05.wav,,
++UA06,heldout,uk,Vincennes,hard,Лис,"Плюс, Вежа. Я Лис, там само, без змін, прийом.",position,там само,(unit history),same_as_last,0,плюс acknowledgement plus same position,UA06.wav,,
++UA07,practice,uk,Vincennes,medium,Сокіл,"Вежа, я Сокіл, метрів сто праворуч від вокзалу, якщо дивитись на замок, прийом.",position,вокзал,Vincennes (RER A),right_of,100,relative left or right using a reference heading,UA07.wav,,
++UA08,practice,uk,Vincennes,hard,Граніт,Вежа... я Граніт... між зоопарком і озером Доменіль... прийом.,position,зоопарк і озеро Доменіль,Parc zoologique de Paris + Lac Daumesnil,between,0,broken transmission in Ukrainian (record with noise),UA08.wav,,
++UA09,heldout,uk,Bila Tserkva,easy,Сокіл,"Вежа, я Сокіл, сто метрів на захід від Торгових рядів, прийом.",position,Торгові ряди,Торгові ряди,west_of,100,Cyrillic OSM name matches directly,UA09.wav,,
++UA10,heldout,uk,Bila Tserkva,medium,Граніт,"Вежа, я Граніт, біля Преображенського собору, з боку парку, прийом.",position,Преображенський собор,Спасо-Преображенський собор,near,30,partial name of an official OSM name,UA10.wav,,
++UA11,practice,uk,Bila Tserkva,medium,Лис,"Вежа, я Лис, перейшов міст через Рось, метрів п'ятдесят на північ, прийом.",moving,міст через Рось,(bridge over river Рось),north_of,50,landmark described not named,UA11.wav,,
++UA12,practice,uk,Bila Tserkva,easy,Сокіл,"Вежа, я Сокіл, на головному вході в Олександрію, прийом.",position,Олександрія,Дендропарк Олександрія,at,0,short local name for an official park name,UA12.wav,,
++UA13,practice,uk,Bila Tserkva,medium,Граніт,"Вежа, я Граніт, рухаюсь від вокзалу на південь, пройшов метрів триста, прийом.",moving,вокзал,Біла Церква (залізнична станція),south_of,300,distance travelled from a start point,UA13.wav,,
++UA14,heldout,uk,Bila Tserkva,medium,Лис,"Вежа, я Лис, двісті п'ятдесят метрів на північний схід від собору, прийом.",position,собор,Спасо-Преображенський собор,northeast_of,250,compound number and diagonal direction,UA14.wav,,
++UA15,practice,uk,Bila Tserkva,hard,Сокіл,"Вежа, я Сокіл, на третій годині від мене Торгові ряди, метрів сто, прийом.",position,Торгові ряди,Торгові ряди,clock_3,100,clock direction relative to own heading (stretch goal),UA15.wav,,
++RU01,practice,ru,Vincennes,easy,Сокол,"Башня, я Сокол, на позиции, пятьдесят метров севернее Венсенского замка, приём.",position,Венсенский замок,Château de Vincennes,north_of,50,Russian baseline with севернее form,RU01.wav,,
++RU02,practice,ru,Vincennes,easy,Сокол,"Башня, я Сокол, выдвигаюсь к мэрии, буду через две минуты, приём.",moving,мэрия,Hôtel de Ville de Vincennes,at,0,Russian word for town hall,RU02.wav,,
++RU03,practice,ru,Vincennes,medium,Гранит,"Башня, я Гранит, вижу троих, метров двести восточнее озера Миним, двигаются на юг, приём.",contact,озеро Миним,Lac des Minimes,east_of,200,approximate distance phrasing (метров двести),RU03.wav,,
++RU04,practice,ru,Vincennes,hard,Лис,"Башня, я Лис, за церковью, с восточной стороны, приём.",position,церковь,Église Notre-Dame de Vincennes,east_of,20,ambiguous church in Russian,RU04.wav,,
++RU05,practice,ru,Vincennes,hard,Гранит,"Башня, я Гранит, отставить, не озеро. Сто метров южнее входа в Цветочный парк, приём.",position,Цветочный парк,Parc Floral de Paris,south_of,100,Russian correction word (отставить),RU05.wav,,
++RU06,heldout,ru,Vincennes,hard,Лис,"Плюс, Башня. Я Лис, на том же месте, без изменений, приём.",position,на том же месте,(unit history),same_as_last,0,same position in Russian,RU06.wav,,
++RU07,practice,ru,Vincennes,medium,Сокол,"Башня, я Сокол, полтораста метров западнее ипподрома, наблюдаю, приём.",observing,ипподром,Hippodrome de Paris-Vincennes,west_of,150,colloquial number (полтораста),RU07.wav,,
++RU08,heldout,ru,Bila Tserkva,easy,Сокол,"Башня, я Сокол, сто метров западнее Торговых рядов, приём.",position,Торговые ряды,Торгові ряди,west_of,100,Russian name for a Ukrainian OSM name,RU08.wav,,
++RU09,heldout,ru,Bila Tserkva,medium,Гранит,"Башня, я Гранит, у Преображенского собора, со стороны парка, приём.",position,Преображенский собор,Спасо-Преображенський собор,near,30,cross-language match Russian to Ukrainian,RU09.wav,,
++RU10,practice,ru,Bila Tserkva,medium,Лис,"Башня, я Лис, иду от вокзала на юг, прошёл метров триста, приём.",moving,вокзал,Біла Церква (залізнична станція),south_of,300,movement from start point in Russian,RU10.wav,,
++MX01,practice,mixed,Vincennes,hard,Сокіл,"Вежа, я Сокіл, стою возле замка, метрів п'ятдесят на північ, приём.",position,замок,Château de Vincennes,north_of,50,surzhyk with Russian and Ukrainian in one call,MX01.wav,,
++MX02,practice,mixed,Vincennes,hard,Граніт,"Вежа, я Граніт, contact, двісті метрів east від озера Мінім, прийом.",contact,озеро Мінім,Lac des Minimes,east_of,200,code switching with English military words,MX02.wav,,
++MX03,heldout,mixed,Bila Tserkva,hard,Лис,"Вежа, я Лис, короче, за собором, со стороны парку, метрів тридцять, прийом.",position,собор,Спасо-Преображенський собор,behind,30,filler words plus mixed grammar,MX03.wav,,
++MX04,practice,mixed,Bila Tserkva,hard,Сокол,"Башня, я Сокол, на вокзале, ой, мінус, біля Торгових рядів, приём.",position,Торгові ряди,Торгові ряди,at,0,mid-sentence self correction across languages,MX04.wav,,
++MX05,practice,mixed,Vincennes,hard,Viper 2,"Hawk, Viper 2, я біля château, north side, over.",position,château,Château de Vincennes,north_of,20,three languages in one call,MX05.wav,,
++FL01,practice,uk,Vincennes,medium,Сокіл,"Вежа, я Сокіл, на Ромашці, без змін, прийом.",position,Ромашка,@mission:Ромашка,at,0,unit codename from mission reference list (not in OSM),FL01.wav,,
++FL02,practice,uk,Vincennes,medium,Граніт,"Вежа, я Граніт, сто метрів на схід від Сараю, прийом.",position,Сарай,@mission:Сарай,east_of,100,offset from a codename point,FL02.wav,,
++FL03,heldout,uk,Vincennes,medium,Лис,"Вежа, я Лис, вийшов на орієнтир три, прийом.",moving,орієнтир три,@mission:Орієнтир 3,at,0,numbered reference point spoken as a word,FL03.wav,,
++FL04,heldout,uk,Vincennes,hard,Сокіл,"Вежа, я Сокіл, у другій посадці, метрів двісті від Ромашки на північ, прийом.",position,друга посадка / Ромашка,@mission:Друга посадка,north_of,200,tree line named by order plus codename offset,FL04.wav,,
++FL05,practice,ru,Vincennes,medium,Гранит,"Башня, я Гранит, на Сарае, вижу двоих, двигаются к ориентиру три, приём.",contact,Сарай,@mission:Сарай,at,0,Russian inflection of a Ukrainian codename,FL05.wav,,
++FL06,practice,ru,Vincennes,hard,Лис,"Башня, я Лис, между Ромашкой и Сараем, в зелёнке, приём.",position,Ромашка и Сарай,@mission:Ромашка + @mission:Сарай,between,0,midpoint of two codenames plus slang (зелёнка),FL06.wav,,
++FL07,heldout,mixed,Vincennes,hard,Сокіл,"Вежа, я Сокіл, мінус Ромашка, я на орієнтирі три, прийом.",position,орієнтир три,@mission:Орієнтир 3,at,0,correction between two codenames,FL07.wav,,
++FL08,practice,uk,Vincennes,hard,Граніт,"Вежа, я Граніт, квадрат 12, по улитці 7, прийом.",position,квадрат 12 улитка 7,@grid:12-7,in_grid,0,grid square with snail subdivision (stretch goal),FL08.wav,,
++DR01,practice,uk,Vincennes,medium,Сокіл,"Вежа, я Сокіл, пташка над Ромашкою, йде на схід, прийом.",drone_sighting,Ромашка,@mission:Ромашка,above,0,generic drone slang plus heading; threat_type drone (generic),DR01.wav,,
++DR02,practice,uk,Vincennes,hard,Граніт,"Вежа, я Граніт, ждун біля Сараю, метрів п'ятдесят на захід, не підходити, прийом.",drone_sighting,Сарай,@mission:Сарай,west_of,50,ambush FPV slang plus warning; threat_type fpv_ambush,DR02.wav,,
++DR03,heldout,ru,Vincennes,medium,Лис,"Башня, я Лис, орлан над второй посадкой, кружит, приём.",drone_sighting,вторая посадка,@mission:Друга посадка,above,0,recon fixed-wing in Russian; threat_type recon_fixed_wing,DR03.wav,,
++DR04,heldout,uk,Vincennes,hard,Сокіл,"Вежа, я Сокіл, фпв на оптиці, заходить з півночі на орієнтир три, прийом.",drone_sighting,орієнтир три,@mission:Орієнтир 3,north_of,0,fiber-optic FPV with approach direction; threat_type fpv_fiber,DR04.wav,,
++DR05,practice,mixed,Vincennes,hard,Граніт,"Вежа, я Граніт, мавік висить над нами, метрів сто вгору, приём.",drone_sighting,над нами,(unit history),above,0,drone above the reporting unit itself; threat_type recon_quad,DR05.wav,,
++DR06,practice,uk,Vincennes,medium,Лис,"Вежа, я Лис, мопед пройшов над замком на захід, прийом.",drone_sighting,замок,Château de Vincennes,above,0,Shahed slang over an OSM landmark; threat_type long_range_strike,DR06.wav,,
++AN01,heldout,uk,Vincennes,medium,Сокіл,"Вежа, я Сокіл, рухаюсь на схід від замку, ціль на третій годині, метрів сто, прийом.",contact,замок,Château de Vincennes,clock_3,100,clock method needs heading east from the same call -> target to the south,AN01.wav,,
++AN02,practice,uk,Vincennes,hard,Граніт,"Вежа, я Граніт, від Сараю азимут п'ятнадцять нуль нуль, двісті метрів, бачу двох, прийом.",contact,Сарай,@mission:Сарай,bearing_mils_1500,200,azimuth in mils spoken as 15-00; check 6000 vs 6400 system,AN02.wav,,
++AN03,practice,en,Vincennes,medium,Viper 2,"Hawk, Viper 2, moving north from the town hall, contact half right, 150 metres, over.",contact,town hall,Hôtel de Ville de Vincennes,half_right,150,British style half right relative to heading north -> northeast,AN03.wav,,
++AN04,practice,ru,Vincennes,medium,Лис,"Башня, я Лис, иду на запад от ипподрома, птичка на девять часов, приём.",drone_sighting,ипподром,Hippodrome de Paris-Vincennes,clock_9,0,clock 9 while heading west -> drone to the south,AN04.wav,,
+diff --git a/backend/services/placement.py b/backend/services/placement.py
+new file mode 100644
+index 0000000..79cf44a
+--- /dev/null
++++ b/backend/services/placement.py
+@@ -0,0 +1,106 @@
++"""Glue between the API pipeline and the language layer.
++
++resolve_landmark_position(): spoken landmark -> coordinates (+ outline when OSM has one)
++place(): landmark + relation + distance -> final position with an honest uncertainty circle
++"""
++import time
++from typing import Any
++
++from config import DEMO_AREA
++from services.geocode import geocode_landmark
++from services.language.alias_lookup import resolve
++from services.language.fuse import PROFILES
++from services.language.geometry import BEARINGS, place_report
++from services.language.threat_lookup import resolve_threat
++from services.overpass import find_nearest_generic_landmark
++from services.spatial import calculate_relative_offset, calculate_towards_offset
++
++GENERIC = {
++    "church": "church", "церква": "church", "церковь": "church", "собор": "church",
++    "hospital": "hospital", "лікарня": "hospital", "больница": "hospital",
++    "school": "school", "школа": "school",
++    "bank": "bank", "банк": "bank",
++    "town hall": "town hall", "ратуша": "town hall", "мерія": "town hall", "мэрия": "town hall",
++}
++COMPASS = set(BEARINGS)                       # north_of ... northwest_of
++HEADING_RELATIVE = {"front_of": 0, "right_of": 90, "behind": 180, "left_of": 270}
++
++
++def _geojson_to_shape(geojson: dict | None):
++    """OSM GeoJSON (lon, lat) -> (coords as (lat, lon), kind) for geometry.place_report."""
++    if not geojson:
++        return None, None
++    gtype, coords = geojson.get("type"), geojson.get("coordinates")
++    try:
++        if gtype == "Polygon":
++            return [(c[1], c[0]) for c in coords[0]], "polygon"
++        if gtype == "MultiPolygon":
++            ring = max((poly[0] for poly in coords), key=len)
++            return [(c[1], c[0]) for c in ring], "polygon"
++        if gtype == "LineString":
++            return [(c[1], c[0]) for c in coords], "line"
++    except (TypeError, IndexError):
++        pass
++    return None, None
++
++
++async def resolve_landmark_position(landmark: str, speaker: str | None, previous: list[float],
++                                    unit_positions: dict) -> dict[str, Any] | None:
++    """Unit callsigns -> mission codenames -> alias table -> OSM (Nominatim) -> nearest generic POI."""
++    hit = resolve(landmark, area=DEMO_AREA, unit_positions=unit_positions)
++    if hit["source"] in ("mission", "unit"):
++        return {"lat": hit["lat"], "lon": hit["lon"], "geojson": None,
++                "source": hit["source"], "name": hit["name"]}
++
++    name = hit["name"]
++    result = await geocode_landmark(name, previous[0], previous[1])
++    if result is None:
++        generic = GENERIC.get(landmark.lower().strip()) or GENERIC.get(name.lower().strip())
++        if generic:
++            result = await find_nearest_generic_landmark(generic, previous[0], previous[1])
++    if result is None:
++        return None
++    result.update(source=hit["source"], name=name)
++    return result
++
++
++def place(intent, landmark: dict, previous: list[float], heading: float, speaker_known: bool):
++    """Return (lat, lon, uncertainty_m, method)."""
++    relation, dist = intent.relation, intent.distance_m
++    shape, kind = _geojson_to_shape(landmark.get("geojson"))
++    if shape is None:
++        shape, kind = [(landmark["lat"], landmark["lon"])], "point"
++    last = tuple(previous) if speaker_known else None
++
++    if relation == "towards":
++        lat, lon = calculate_towards_offset(previous[0], previous[1], (landmark["lat"], landmark["lon"]),
++                                            landmark.get("geojson"), dist)
++        return lat, lon, 15 + 0.2 * dist, "moving towards the landmark"
++
++    if intent.bearing_override is not None and relation not in COMPASS:
++        r = place_report(shape, kind, "bearing", dist, last, intent.vague, bearing_deg=intent.bearing_override)
++    elif relation in COMPASS:
++        r = place_report(shape, kind, relation, dist, last, intent.vague)
++    elif relation in HEADING_RELATIVE:
++        bearing = (heading + HEADING_RELATIVE[relation]) % 360
++        r = place_report(shape, kind, "bearing", dist, last, intent.vague, bearing_deg=bearing)
++        r["method"] += " (relative to the unit's heading)"
++    else:  # at, near, above
++        r = place_report(shape, kind, "near" if relation == "near" else "at", 0, last, intent.vague)
++    return r["lat"], r["lon"], r["uncertainty_m"], r["method"]
++
++
++def fuse_threat(store, intent, callsign: str, lat: float, lon: float, uncertainty: float):
++    """Turn a sighting into a fused map marker. Returns a dict for models.Threat, or None."""
++    threat = resolve_threat(intent.threat_word) if intent.threat_word else None
++    if threat is None and intent.action == "drone_sighting":
++        threat = {"type": "drone (type unknown)", "category": "uav", "matched": intent.threat_word or "", "verified": False}
++    if threat is None and intent.action == "contact":
++        threat = {"type": "enemy personnel", "category": "infantry", "matched": "", "verified": True}
++    if threat is None:
++        return None
++    category = threat["category"] if threat["category"] in PROFILES else "uav"
++    marker, what = store.fuser.add(callsign, category, lat, lon, max(uncertainty, 5), time.time(),
++                                   count=intent.count or 1, another=intent.another)
++    threat.update(marker_id=marker.id, count=marker.count, confidence=marker.confidence, fusion=what)
++    return threat
+diff --git a/backend/services/store.py b/backend/services/store.py
+index f2cb071..e4f2ac4 100644
+--- a/backend/services/store.py
++++ b/backend/services/store.py
+@@ -1,25 +1,74 @@
++import time
+ from typing import Any
+ 
+ from fastapi import WebSocket
+ 
++from config import DEFAULT_CALLSIGN
+ from models import LocationEvent
++from services.language.alias_lookup import _norm
++from services.language.fuse import SightingFuser
++
++# Reports about OTHER things (enemy, drones): their position is not the speaker's position.
++SIGHTING_ACTIONS = {"contact", "drone_sighting"}
+ 
+ 
+ class EventStore:
+     def __init__(self) -> None:
+         self.events: list[LocationEvent] = []
+         self._connections: set[WebSocket] = set()
+-        self.previous_coords: list[float] | None = None
+-        self.last_landmark: str | None = None
+-        self.heading: float = 0.0
+-        self.callsign: str = "Viper One"
++        # Per-callsign memory, so Сокіл's "same position" never uses Граніт's position.
++        self.units: dict[str, dict[str, Any]] = {}
++        self.fuser = SightingFuser()
++        # Kept for backwards compatibility with the single-unit demo
++        self.callsign: str = DEFAULT_CALLSIGN
++
++    # ---- per-unit state -------------------------------------------------
++    def canonical(self, callsign: str | None) -> str:
++        """Same unit whatever the spelling: "Граніт" (uk) == "Гранит" (ru) == "граніт"."""
++        name = callsign or self.callsign
++        key = _norm(name)
++        for existing in self.units:
++            if _norm(existing) == key:
++                return existing
++        return name
++
++    def unit(self, callsign: str | None) -> dict[str, Any]:
++        key = self.canonical(callsign)
++        return self.units.setdefault(key, {"coords": None, "last_landmark": None, "heading": 0.0, "t": None})
++
++    def unit_positions(self, exclude: str | None = None) -> dict[str, tuple[float, float, float]]:
++        """Positions of every known unit, for reports like '300 m north of Птаха'."""
++        return {name: (u["coords"][0], u["coords"][1], u["t"])
++                for name, u in self.units.items()
++                if u["coords"] and name != self.canonical(exclude)}
++
++    @property
++    def previous_coords(self) -> list[float] | None:
++        return self.unit(self.callsign)["coords"]
++
++    @property
++    def last_landmark(self) -> str | None:
++        return self.unit(self.callsign)["last_landmark"]
++
++    @property
++    def heading(self) -> float:
++        return self.unit(self.callsign)["heading"]
++
++    @heading.setter
++    def heading(self, value: float) -> None:
++        self.unit(self.callsign)["heading"] = value
+ 
++    # ---- events --------------------------------------------------------------
+     def add(self, event: LocationEvent) -> None:
+         self.events.append(event)
+-        if event.status == "ok" and event.resolved_coords:
+-            self.previous_coords = event.resolved_coords
+-        if event.status == "ok" and event.intent.landmark:
+-            self.last_landmark = event.intent.landmark
++        if event.status != "ok":
++            return
++        u = self.unit(event.callsign)
++        if event.intent.action not in SIGHTING_ACTIONS and event.resolved_coords:
++            u["coords"] = event.resolved_coords
++            u["t"] = time.time()
++        if event.intent.landmark:
++            u["last_landmark"] = event.intent.landmark
+ 
+     def get_events(self) -> list[LocationEvent]:
+         return list(self.events)
+diff --git a/backend/services/transcribe.py b/backend/services/transcribe.py
+index 83fcc48..e9c4159 100644
+--- a/backend/services/transcribe.py
++++ b/backend/services/transcribe.py
+@@ -3,6 +3,8 @@ import asyncio
+ 
+ import google.generativeai as genai
+ 
++from config import GEMINI_MODEL
++
+ 
+ def _transcribe(file_bytes: bytes, content_type: str) -> str:
+     api_key = os.environ.get("GEMINI_API_KEY")
+@@ -10,9 +12,12 @@ def _transcribe(file_bytes: bytes, content_type: str) -> str:
+         raise RuntimeError("GEMINI_API_KEY is not configured")
+ 
+     genai.configure(api_key=api_key)
+-    model = genai.GenerativeModel("gemini-flash-lite-latest")
++    model = genai.GenerativeModel(GEMINI_MODEL)
+     response = model.generate_content([
+-        "Transcribe this tactical or emergency report exactly. Return only the spoken text.",
++        "Transcribe this military radio report exactly as spoken. It may be in Ukrainian, Russian, "
++        "English or a mix of them. Keep each word in the language and script it was spoken in "
++        "(Ukrainian and Russian in Cyrillic). Do NOT translate. Keep callsigns, codenames and slang "
++        "(for example ждун, мопед, пташка, посадка) exactly. Return only the spoken text.",
+         {"mime_type": content_type, "data": file_bytes},
+     ])
+ 
+diff --git a/backend/tests/test_pipeline_offline.py b/backend/tests/test_pipeline_offline.py
+new file mode 100644
+index 0000000..f170f46
+--- /dev/null
++++ b/backend/tests/test_pipeline_offline.py
+@@ -0,0 +1,55 @@
++"""End-to-end test of the backend with Gemini and Nominatim replaced by fakes."""
++import sys, types, asyncio
++import os; sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
++# google.generativeai is not needed for the fake run
++sys.modules.setdefault("google", types.ModuleType("google"))
++sys.modules["google.generativeai"] = types.ModuleType("google.generativeai")
++
++from fastapi.testclient import TestClient
++import main
++from models import SpatialIntent
++import services.placement as placement
++
++FAKE = {
++ "Вежа, я Сокіл, сто метрів на схід від Сараю, прийом.":
++   dict(action="locate", landmark="Сарай", relation="east_of", distance_m=100, callsign="Сокіл", language="uk"),
++ "Башня, я Гранит, на Ромашке, вижу двоих, приём.":
++   dict(action="contact", landmark="Ромашка", relation="at", distance_m=0, callsign="Гранит", language="ru", count=2),
++ "Вежа, я Лис, ждун біля Сараю, метрів п'ятдесят на захід, не підходити, прийом.":
++   dict(action="drone_sighting", landmark="Сарай", relation="west_of", distance_m=50, callsign="Лис", language="uk", vague=True, threat_word="ждун"),
++ "Вежа, я Граніт, ждун біля Сараю, на захід, метрів сорок, прийом.":
++   dict(action="drone_sighting", landmark="Сарай", relation="west_of", distance_m=40, callsign="Граніт", language="uk", threat_word="ждун"),
++ "Вежа, я Сокіл, 50 метрів на північ від Венсенського замку, прийом.":
++   dict(action="locate", landmark="Венсенський замок", relation="north_of", distance_m=50, callsign="Сокіл", language="uk"),
++ "Вежа, я Лис, метрів двісті на північ від Сокола, прийом.":
++   dict(action="locate", landmark="Сокіл", relation="north_of", distance_m=200, callsign="Лис", language="uk", vague=True),
++ "Вежа, я Граніт, біля невідомого місця, прийом.":
++   dict(action="locate", landmark="Неіснуюче місце", relation="at", distance_m=0, callsign="Граніт", language="uk"),
++}
++
++async def fake_extract(transcript, *a, **k):
++    d = dict(bearing_override=None, tactical_confirmation="(read-back)", vague=False, threat_word=None, count=1, another=False)
++    d.update(FAKE[transcript]); return SpatialIntent(**d)
++
++CHATEAU = {"lat": 48.8428, "lon": 2.4357, "display_name": "Château de Vincennes",
++           "geojson": {"type": "Polygon", "coordinates": [[[2.4330, 48.8410], [2.4385, 48.8410], [2.4385, 48.8447], [2.4330, 48.8447], [2.4330, 48.8410]]]}}
++async def fake_geocode(name, *a, **k):
++    return dict(CHATEAU) if name == "Château de Vincennes" else None
++async def fake_generic(*a, **k): return None
++
++main.extract_intent = fake_extract
++placement.geocode_landmark = fake_geocode
++placement.find_nearest_generic_landmark = fake_generic
++
++c = TestClient(main.app)
++for t in FAKE:
++    r = c.post("/api/process-text", json={"transcript": t})
++    e = r.json()
++    if r.status_code != 200: print("HTTP", r.status_code, e); continue
++    th = e.get("threat") or {}
++    print(f"{e['callsign']:7} {e['status']:5} {e['intent']['action']:15} src={e.get('landmark_source')!s:8} "
++          f"pos={e['resolved_coords'] and [round(x,5) for x in e['resolved_coords']]} ±{e.get('uncertainty_m')} m "
++          f"{('| ' + th['type'] + ' #' + str(th['marker_id']) + ' x' + str(th['count']) + ' ' + th['confidence'] + ' (' + th['fusion'] + ')') if th else ''}"
++          f"{' | ' + e['error'] if e.get('error') else ''}")
++print("\nFused markers:", [(m['id'], m['category'], m['count'], m['confidence']) for m in c.get('/api/markers').json()])
++print("Units:", {k: v['coords'] for k, v in main.store.units.items()})
+diff --git a/frontend/src/App.jsx b/frontend/src/App.jsx
+index 7c505d5..a5fa5c4 100644
+--- a/frontend/src/App.jsx
++++ b/frontend/src/App.jsx
+@@ -1,5 +1,6 @@
+ import { useEffect, useState } from "react";
+ import MicButton from "./components/MicButton.jsx";
++import TextReport from "./components/TextReport.jsx";
+ import TacticalMap from "./components/TacticalMap.jsx";
+ import EventLog from "./components/EventLog.jsx";
+ import ReplaySlider from "./components/ReplaySlider.jsx";
+@@ -37,7 +38,7 @@ export default function App() {
+     <main className="dashboard">
+       <header className="topbar">
+         <div>
+-          <p className="eyebrow">TACTICAL COMMS / D.C.</p>
++          <p className="eyebrow">TACTICAL COMMS / VINCENNES · UA · RU · EN</p>
+           <h1>Voice-to-Tactical-Map</h1>
+         </div>
+         <div className={`connection ${connected ? "is-connected" : ""}`}>
+@@ -60,16 +61,23 @@ export default function App() {
+         <aside className="side-column">
+           <div className="control-panel">
+             <MicButton onEvent={handleEvent} onError={setAppError} />
++            <TextReport onEvent={handleEvent} onError={setAppError} />
+           </div>
+ 
+           <section className="panel extraction-panel">
+             <div className="panel-heading">LATEST EXTRACTION</div>
+             {latest ? (
+               <>
+-                <p className="transcript">“{latest.transcript}”</p>
++                <p className="transcript">{latest.callsign && <b>{latest.callsign}: </b>}“{latest.transcript}”</p>
+                 {latest.status === "ok" && (
+                   <p className="tactical-confirmation">{latest.intent.tactical_confirmation}</p>
+                 )}
++                {latest.threat && (
++                  <p className="threat-line">⚠ {latest.threat.type}{latest.threat.count > 1 ? ` ×${latest.threat.count}` : ""} · {latest.threat.confidence}</p>
++                )}
++                {latest.uncertainty_m != null && (
++                  <p className="placement-line">±{Math.round(latest.uncertainty_m)} m · {latest.placement_method}{latest.landmark_source ? ` · via ${latest.landmark_source}` : ""}</p>
++                )}
+                 <pre>{JSON.stringify(latest.intent, null, 2)}</pre>
+               </>
+             ) : <div className="empty-state">Waiting for a report</div>}
+diff --git a/frontend/src/components/EventLog.jsx b/frontend/src/components/EventLog.jsx
+index 3757ee3..ec219ec 100644
+--- a/frontend/src/components/EventLog.jsx
++++ b/frontend/src/components/EventLog.jsx
+@@ -22,10 +22,10 @@ export default function EventLog({ events, onSelect }) {
+               onClick={() => onSelect(index)}
+             >
+               <time>[{formatTime(event.timestamp)}]</time>
+-              <span className="event-transcript">{event.transcript}</span>
++              <span className="event-transcript">{event.callsign && <b>{event.callsign} · </b>}{event.threat && "⚠ "}{event.transcript}</span>
+               <span className="event-meta">
+                 {coords ? `${coords[0].toFixed(5)}, ${coords[1].toFixed(5)}` : "NO POSITION"}
+-                <b>{event.intent.relation}</b>
++                <b>{event.threat ? event.threat.category : event.intent.relation}</b>
+               </span>
+             </button>
+           );
+diff --git a/frontend/src/components/TacticalMap.jsx b/frontend/src/components/TacticalMap.jsx
+index efd65d1..37447bf 100644
+--- a/frontend/src/components/TacticalMap.jsx
++++ b/frontend/src/components/TacticalMap.jsx
+@@ -1,59 +1,113 @@
+-import { useEffect, useMemo } from "react";
++import { Fragment, useEffect, useMemo } from "react";
+ import { divIcon } from "leaflet";
+-import { MapContainer, Marker, Polyline, TileLayer, useMap } from "react-leaflet";
++import { Circle, MapContainer, Marker, Polyline, TileLayer, Tooltip, useMap } from "react-leaflet";
+ 
+-const pulseIcon = divIcon({
++export const DEMO_CENTER = [48.8445, 2.4385]; // Vincennes
++
++const UNIT_COLOURS = ["#e0b84f", "#62c1d8", "#9be07a", "#e08fd0", "#f0a05a"];
++const THREAT_ICONS = {
++  fpv: "FPV", fpv_fiber: "FPV~", fpv_ambush: "ЖД", recon_quad: "QR", recon_fixed_wing: "ISR",
++  loitering_munition: "LM", attack_fixed_wing: "ATK", long_range_strike: "SHD", bomber: "BMB",
++  uav: "UAV", infantry: "INF", vehicle: "VEH",
++};
++
++const unitIcon = (colour, label) => divIcon({
+   className: "position-marker-wrap",
+-  html: '<div class="position-marker"><span></span></div>',
++  html: `<div class="position-marker" style="border-color:${colour};box-shadow:0 0 18px ${colour}"><span style="background:${colour}"></span></div>
++         <div class="unit-label" style="color:${colour}">${label}</div>`,
+   iconSize: [28, 28],
+   iconAnchor: [14, 14],
+ });
+ 
+-function MapController({ trail, centerCoords }) {
+-  const map = useMap();
++const threatIcon = (threat) => divIcon({
++  className: "threat-marker-wrap",
++  html: `<div class="threat-marker ${threat.confidence?.startsWith("confirmed") ? "is-confirmed" : ""}">
++           ${THREAT_ICONS[threat.category] || "!"}${threat.count > 1 ? ` ×${threat.count}` : ""}
++         </div>`,
++  iconSize: [44, 22],
++  iconAnchor: [22, 11],
++});
+ 
++function MapController({ points, centerCoords }) {
++  const map = useMap();
+   useEffect(() => {
+-    if (centerCoords) {
+-      map.flyTo(centerCoords, 15, { duration: 0.6 });
+-    } else if (trail.length > 1) {
+-      map.fitBounds(trail, { padding: [40, 40], maxZoom: 16 });
+-    }
+-  }, [map, trail, centerCoords]);
+-
++    if (centerCoords) map.flyTo(centerCoords, 16, { duration: 0.6 });
++    else if (points.length > 1) map.fitBounds(points, { padding: [40, 40], maxZoom: 16 });
++  }, [map, points, centerCoords]);
+   return null;
+ }
+ 
+ export default function TacticalMap({ events, replayIndex, centerCoords }) {
+-  const replayEvents = replayIndex === null
+-    ? events
+-    : events.slice(0, replayIndex + 1);
+-  const trail = useMemo(() => replayEvents
+-    .filter((event) => event.status === "ok" && event.resolved_coords)
+-    .map((event) => event.resolved_coords), [replayEvents]);
+-  const landmarkMarkers = replayEvents.filter((event) => event.landmark_coords);
+-  const current = trail.at(-1) || [38.9072, -77.0369];
++  const shown = replayIndex === null ? events : events.slice(0, replayIndex + 1);
++  const ok = shown.filter((e) => e.status === "ok" && e.resolved_coords);
++
++  // Friendly units: one track per callsign (sightings are NOT the reporter's position)
++  const units = useMemo(() => {
++    const byUnit = {};
++    ok.filter((e) => !e.threat && !["contact", "drone_sighting"].includes(e.intent.action))
++      .forEach((e) => {
++        const key = e.callsign || "Unit";
++        (byUnit[key] ||= []).push(e);
++      });
++    return Object.entries(byUnit);
++  }, [ok]);
++
++  // Threats: keep only the latest report per fused marker
++  const threats = useMemo(() => {
++    const byMarker = {};
++    ok.filter((e) => e.threat).forEach((e) => { byMarker[e.threat.marker_id] = e; });
++    return Object.values(byMarker);
++  }, [ok]);
++
++  const allPoints = ok.map((e) => e.resolved_coords);
+ 
+   return (
+-    <MapContainer
+-      className="tactical-map"
+-      center={[38.9072, -77.0369]}
+-      zoom={13}
+-      scrollWheelZoom
+-    >
++    <MapContainer className="tactical-map" center={DEMO_CENTER} zoom={15} scrollWheelZoom>
+       <TileLayer
+         attribution="&copy; OpenStreetMap contributors"
+         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+       />
+-      {trail.length > 1 && <Polyline positions={trail} pathOptions={{ color: "#e0b84f", weight: 4 }} />}
+-      {landmarkMarkers.map((event) => (
+-        <Marker
+-          key={`landmark-${event.id}`}
+-          position={event.landmark_coords}
+-          icon={divIcon({ className: "landmark-marker", html: "", iconSize: [10, 10] })}
+-        />
++
++      {units.map(([callsign, list], i) => {
++        const colour = UNIT_COLOURS[i % UNIT_COLOURS.length];
++        const trail = list.map((e) => e.resolved_coords);
++        const last = list.at(-1);
++        return (
++          <Fragment key={callsign}>
++            {trail.length > 1 && <Polyline positions={trail} pathOptions={{ color: colour, weight: 3, opacity: 0.8 }} />}
++            {last.uncertainty_m && (
++              <Circle center={last.resolved_coords} radius={last.uncertainty_m}
++                      pathOptions={{ color: colour, weight: 1, fillOpacity: 0.08 }} />
++            )}
++            <Marker position={last.resolved_coords} icon={unitIcon(colour, callsign)}>
++              <Tooltip>{last.intent.tactical_confirmation}<br />±{Math.round(last.uncertainty_m || 0)} m · {last.placement_method}</Tooltip>
++            </Marker>
++          </Fragment>
++        );
++      })}
++
++      {threats.map((e) => (
++        <Fragment key={`threat-${e.threat.marker_id}`}>
++          <Circle center={e.resolved_coords} radius={e.uncertainty_m || 30}
++                  pathOptions={{ color: "#d65454", weight: 1, dashArray: "4 4", fillOpacity: 0.12 }} />
++          <Marker position={e.resolved_coords} icon={threatIcon(e.threat)}>
++            <Tooltip>
++              <b>{e.threat.type}</b>{e.threat.count > 1 ? ` ×${e.threat.count}` : ""}<br />
++              {e.threat.confidence}<br />
++              {e.intent.tactical_confirmation}
++            </Tooltip>
++          </Marker>
++        </Fragment>
+       ))}
+-      <Marker position={current} icon={pulseIcon} />
+-      <MapController trail={trail} centerCoords={centerCoords} />
++
++      {ok.filter((e) => e.landmark_coords && !["unit", "mission"].includes(e.landmark_source)).map((e) => (
++        <Marker key={`landmark-${e.id}`} position={e.landmark_coords}
++                icon={divIcon({ className: "landmark-marker", html: "", iconSize: [10, 10] })}>
++          <Tooltip>{e.intent.landmark}{e.landmark_name && e.landmark_name !== e.intent.landmark ? ` → ${e.landmark_name}` : ""}</Tooltip>
++        </Marker>
++      ))}
++
++      <MapController points={allPoints} centerCoords={centerCoords} />
+     </MapContainer>
+   );
+ }
+diff --git a/frontend/src/components/TextReport.jsx b/frontend/src/components/TextReport.jsx
+new file mode 100644
+index 0000000..2b62189
+--- /dev/null
++++ b/frontend/src/components/TextReport.jsx
+@@ -0,0 +1,40 @@
++import { useState } from "react";
++
++// Demo fallback: type or paste a radio report instead of speaking it.
++export default function TextReport({ onEvent, onError }) {
++  const [text, setText] = useState("");
++  const [busy, setBusy] = useState(false);
++
++  const send = async () => {
++    if (!text.trim() || busy) return;
++    setBusy(true);
++    try {
++      const response = await fetch("http://127.0.0.1:8000/api/process-text", {
++        method: "POST",
++        headers: { "Content-Type": "application/json" },
++        body: JSON.stringify({ transcript: text }),
++      });
++      const payload = await response.json();
++      if (!response.ok) throw new Error(payload.detail || "Processing failed");
++      onEvent(payload);
++      setText("");
++    } catch (error) {
++      onError(error.message);
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  return (
++    <div className="text-report">
++      <input
++        value={text}
++        onChange={(e) => setText(e.target.value)}
++        onKeyDown={(e) => e.key === "Enter" && send()}
++        placeholder="Вежа, я Сокіл, сто метрів на схід від Сараю, прийом"
++        disabled={busy}
++      />
++      <button type="button" onClick={send} disabled={busy}>{busy ? "…" : "SEND"}</button>
++    </div>
++  );
++}
+diff --git a/frontend/src/styles.css b/frontend/src/styles.css
+index 4074f37..f176720 100644
+--- a/frontend/src/styles.css
++++ b/frontend/src/styles.css
+@@ -24,7 +24,7 @@ button, input { font: inherit; }
+ .workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; padding: 12px; }
+ .map-column { min-height: 620px; display: grid; grid-template-rows: minmax(520px, 1fr) 58px; gap: 8px; }
+ .tactical-map { width: 100%; height: 100%; min-height: 520px; background: #1b2226; border: 1px solid #30383d; }
+-.side-column { min-height: 620px; display: grid; grid-template-rows: 74px 210px minmax(220px, 1fr); gap: 8px; }
++.side-column { min-height: 620px; display: grid; grid-template-rows: 116px 250px minmax(220px, 1fr); gap: 8px; }
+ 
+ .control-panel, .panel, .replay-control { border: 1px solid #30383d; background: #151a1d; }
+ .control-panel { display: grid; place-items: center; }
+@@ -70,3 +70,15 @@ button, input { font: inherit; }
+   .side-column { min-height: 620px; }
+   .tactical-map { min-height: 440px; }
+ }
++
++/* Language layer additions */
++.control-panel { gap: 6px; padding: 8px 0; }
++.text-report { width: calc(100% - 16px); display: flex; gap: 6px; }
++.text-report input { flex: 1; min-width: 0; height: 34px; padding: 0 8px; border: 1px solid #465156; background: #0f1417; color: #eff4f5; font-size: 12px; }
++.text-report button { height: 34px; padding: 0 12px; border: 1px solid #707e84; background: #20282c; color: #eff4f5; font-weight: 800; cursor: pointer; }
++.threat-line { margin: 6px 12px; padding: 6px 10px; border-left: 3px solid #d65454; background: #2a1718; color: #ffc7c7; font-size: 12px; font-weight: 800; }
++.placement-line { margin: 4px 12px; color: #8fa0a6; font-size: 11px; }
++.unit-label { position: absolute; top: 28px; left: 50%; transform: translateX(-50%); white-space: nowrap; font-size: 11px; font-weight: 800; text-shadow: 0 0 3px #000, 0 0 3px #000; }
++.threat-marker-wrap { background: transparent; }
++.threat-marker { min-width: 44px; height: 22px; padding: 0 4px; display: grid; place-items: center; border: 2px solid #d65454; border-radius: 3px; background: rgba(42, 23, 24, 0.92); color: #ffc7c7; font-size: 10px; font-weight: 900; white-space: nowrap; }
++.threat-marker.is-confirmed { border-width: 3px; box-shadow: 0 0 14px rgba(214, 84, 84, 0.9); }
+-- 
+2.43.0
+

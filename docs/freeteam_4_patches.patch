@@ -1,0 +1,1261 @@
+From 95741a72a15657eff63b9eb09b2c18f7c191bf71 Mon Sep 17 00:00:00 2001
+From: Nikita Nedoshovenko <nikita.nedoshovenko@outlook.com>
+Date: Sat, 21 Nov 2026 12:27:37 +0100
+Subject: [PATCH 1/4] Warn on waiting FPVs and mines; stop merging contacts at
+ different places
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A unit walking up to a ждун, a mine or a tripwire got no warning, because warnings fired only for side == hostile
+and radio reports rarely say 'enemy' for these. Unidentified drones, mines, guns and snipers now warn too
+(backend and map).
+
+Two sightings were merged when within 75 m plus speed x time, so two tanks at two landmarks a minute apart became
+one, and two waiting FPVs 150 m apart became one. Movement allowance is now zero for static or firing contacts,
+capped at 100 m when nobody said it was moving, and at 600 m when it is.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KG2RA2i89hGvASt44B7U7K
+---
+ backend/contact.py                 | 20 +++++++++
+ backend/tracker.py                 |  7 +--
+ frontend/src/App.vue               |  5 ++-
+ tests/test_warnings_and_merging.py | 69 ++++++++++++++++++++++++++++++
+ 4 files changed, 97 insertions(+), 4 deletions(-)
+ create mode 100644 tests/test_warnings_and_merging.py
+
+diff --git a/backend/contact.py b/backend/contact.py
+index 544bfee..51a1046 100644
+--- a/backend/contact.py
++++ b/backend/contact.py
+@@ -141,6 +141,26 @@ SPEED_MPS = {"infantry": 1.5, "sniper": 1.0, "civilians": 1.5, "tank": 8.0, "apc
+              "drone": 15.0, "helicopter": 40.0, "aircraft": 100.0, "artillery": 0.0, "ied": 0.0, "unknown": 3.0}
+ SAME_PLACE_M = 75        # two sightings this close (edge to edge, plus movement) can be the same thing
+ WARN_M = 300             # a friendly unit this close to a hostile contact is warned
++# Things that hurt whoever walks up to them, whoever owns them: a waiting FPV ("ждун"), a mine, a tripwire, a gun, a
++# sniper. Radio reports rarely say "enemy" for these ("ждун біля Сараю"), so side stays "unknown"; they warn anyway.
++WARN_UNKNOWN = {"drone", "ied", "artillery", "sniper"}
++DRIFT_M = 100            # most that a contact nobody called "moving" is allowed to have shifted between two reports
++MOVED_MAX_M = 600        # and the most for one that is moving: beyond this a second sighting is a second contact
++
++
++def warns(c: dict | None) -> bool:
++    """Should a friendly unit near this contact be warned? Enemy always; unidentified only when the type is lethal."""
++    c = c or {}
++    return c.get("side") == "hostile" or (c.get("side") == "unknown" and c.get("what") in WARN_UNKNOWN)
++
++
++def reach_m(c: dict, dt: float) -> float:
++    """How far this contact may have moved in dt seconds, for deciding whether a new sighting is the same one.
++    Static or firing: nowhere (a ждун waits, a mine stays). Reported moving: its speed, capped. Not said: a little."""
++    if c.get("activity") in ("static", "firing") or not SPEED_MPS.get(c.get("what"), 3.0):
++        return 0.0
++    far = SPEED_MPS.get(c.get("what"), 3.0) * max(0.0, dt)
++    return min(far, MOVED_MAX_M if c.get("activity") == "moving" or c.get("heading") else DRIFT_M)
+ 
+ 
+ def ttl(c: dict | None) -> float:
+diff --git a/backend/tracker.py b/backend/tracker.py
+index eae64af..9184949 100644
+--- a/backend/tracker.py
++++ b/backend/tracker.py
+@@ -114,7 +114,7 @@ class Tracker:
+             witnesses = [s for s in event["seen_by"] if s not in ("unidentified", *CONTROL_STATIONS)]
+             event["corroborated"] = len(witnesses) >= 2
+             self._track(event, geom)
+-            event["threats"] = self._threats_from(event["contact"], geom, now) if event["contact"]["side"] == "hostile" else []
++            event["threats"] = self._threats_from(event["contact"], geom, now) if contacts.warns(event["contact"]) else []
+         self.events.append(event)
+         return event
+ 
+@@ -176,7 +176,8 @@ class Tracker:
+         for cs, tr in self._live_tracks(now):
+             if not contacts.compatible(tr["contact"], desc):
+                 continue
+-            moved = contacts.SPEED_MPS.get(tr["contact"]["what"], 3.0) * max(0.0, now - tr["t"])
++            # A new report that says "static" is about something that has not moved either.
++            moved = 0.0 if desc.get("activity") == "static" else contacts.reach_m(tr["contact"], now - tr["t"])
+             d = tr["geom"].distance(geom)
+             if d <= contacts.SAME_PLACE_M + moved and (best_d is None or d < best_d):
+                 best, best_d = cs, d
+@@ -196,7 +197,7 @@ class Tracker:
+ 
+     def _threats_near(self, unit: str, unit_geom: BaseGeometry, now: float) -> list[dict]:
+         """Live hostile contacts close to a unit's new position, nearest first."""
+-        hits = [{**w, "track": cs} for cs, tr in self._live_tracks(now) if tr["contact"]["side"] == "hostile"
++        hits = [{**w, "track": cs} for cs, tr in self._live_tracks(now) if contacts.warns(tr["contact"])
+                 and (w := self._warning(unit, unit_geom, tr["contact"], tr["geom"]))]
+         return sorted(hits, key=lambda w: w["distance_m"])
+ 
+diff --git a/frontend/src/App.vue b/frontend/src/App.vue
+index a399942..0100cd7 100644
+--- a/frontend/src/App.vue
++++ b/frontend/src/App.vue
+@@ -148,6 +148,9 @@ const contactsOnMap = computed(() => {
+ const contactDoubt = (e) => !(e.trackConfirmed || e.confirmed || e.corroborated) || e.expired
+   || (live.value && now.value - e.t > contactTtl(e.contact) / 2)
+ const WARN_M = 300   // backend/contact.py WARN_M
++// backend/contact.py warns(): enemy always; unidentified only when lethal to walk up to (waiting FPV, mine, gun, sniper).
++const WARN_UNKNOWN = ['drone', 'ied', 'artillery', 'sniper']
++const warns = (c) => c?.side === 'hostile' || (c?.side === 'unknown' && WARN_UNKNOWN.includes(c?.what))
+ const metres = ([lon1, lat1], [lon2, lat2]) => Math.hypot((lon2 - lon1) * 111320 * Math.cos((lat1 * Math.PI) / 180), (lat2 - lat1) * 110540)
+ const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+ const compass = ([lon1, lat1], [lon2, lat2]) => COMPASS[Math.round(((Math.atan2((lon2 - lon1) * Math.cos((lat1 * Math.PI) / 180), lat2 - lat1)
+@@ -155,7 +158,7 @@ const compass = ([lon1, lat1], [lon2, lat2]) => COMPASS[Math.round(((Math.atan2(
+ // Enemy contacts on the map within WARN_M of a unit (edge to edge, roughly), nearest first. Recomputed as reports
+ // arrive and contacts expire, so a warning clears by itself.
+ function threatsTo(u) {
+-  return contactsOnMap.value.filter((c) => c.contact?.side === 'hostile')
++  return contactsOnMap.value.filter((c) => warns(c.contact))
+     .map((c) => ({ c, d: Math.max(0, metres(u.centre, c.centre) - u.radius_m - c.radius_m) }))
+     .filter((x) => x.d <= WARN_M).sort((a, b) => a.d - b.d)
+     .map(({ c, d }) => ({ what: describeContact({ ...c.contact, activity: null }), d: Math.round(d / 10) * 10, dir: compass(u.centre, c.centre) }))
+diff --git a/tests/test_warnings_and_merging.py b/tests/test_warnings_and_merging.py
+new file mode 100644
+index 0000000..3096dc7
+--- /dev/null
++++ b/tests/test_warnings_and_merging.py
+@@ -0,0 +1,69 @@
++"""Three things the demo depends on: a waiting FPV or a mine warns the unit that walks up to it even though nobody
++said "enemy"; two contacts at two places are two contacts; a thing that does not move is not merged across distance."""
++import asyncio
++
++import pytest
++
++from backend.geo import Gazetteer
++from backend.tracker import Tracker
++
++
++@pytest.fixture(autouse=True)
++def rules_only(monkeypatch):
++    for key in ("GEMINI_API_KEY", "MISTRAL_API_KEY"):
++        monkeypatch.delenv(key, raising=False)
++
++
++def run(lines, step=20):
++    async def go():
++        tracker, t, out = Tracker(Gazetteer(), log=None), 1e6, []
++        for line in lines:
++            out += await tracker.ingest(line, None, now=t)
++            t += step
++        return tracker, out, t
++    return asyncio.run(go())
++
++
++def contacts_live(tracker, t):
++    return [e for e in tracker.picture(now=t) if e.get("type") == "contact"]
++
++
++@pytest.mark.parametrize("threat", ["ждун біля Сараю", "міна біля Сараю"])
++def test_unit_walking_onto_unmarked_threat_is_warned(threat):
++    _, events, _ = run([f"Вежа, я Лис, {threat}, прийом.", "Вежа, я Сокіл, вийшов на Сарай, прийом."])
++    assert [w["callsign"] for w in events[-1]["threats"]] == ["сокіл"]
++
++
++def test_threat_reported_on_top_of_a_unit_warns_it():
++    _, events, _ = run(["Вежа, я Сокіл, на Сараї, прийом.", "Вежа, я Лис, ждун біля Сараю, прийом."])
++    assert "сокіл" in [w["callsign"] for w in events[-1]["threats"]]
++
++
++def test_unidentified_vehicles_and_civilians_do_not_warn():
++    _, events, _ = run(["Zero, this is Alpha two, at the town hall, over",
++                        "Zero, this is Delta one, I see three vehicles near the town hall, over",
++                        "Zero, this is Delta one, civilians near the town hall, over"])
++    assert events[1]["threats"] == [] and events[2]["threats"] == []
++
++
++def test_two_tanks_at_two_places_are_two_tanks():
++    tracker, _, t = run(["Zero, this is Bravo one, contact, enemy tank at the Odeon theatre, over",
++                         "Zero, this is Alpha two, contact, enemy tank at the Saint-Sulpice church, over"], step=60)
++    assert len(contacts_live(tracker, t)) == 2
++
++
++def test_same_tank_seen_by_two_units_is_still_one():
++    tracker, _, t = run(["Zero, this is Charlie one, contact, two enemy tanks, moving north, at the Saint-Sulpice church, over",
++                         "Zero, this is Bravo one, contact, enemy tank near the Saint-Sulpice church, over"])
++    assert len(contacts_live(tracker, t)) == 1
++
++
++def test_two_waiting_fpvs_150_m_apart_are_two():
++    tracker, _, t = run(["Вежа, я Лис, ждун сто метрів на захід від Сараю, прийом.",
++                         "Вежа, я Сокіл, ждун п'ятдесят метрів на схід від Сараю, прийом."])
++    assert len(contacts_live(tracker, t)) == 2
++
++
++def test_same_waiting_fpv_reported_twice_is_one():
++    tracker, _, t = run(["Вежа, я Лис, ждун біля Сараю, прийом.", "Вежа, я Сокіл, ждун біля Сараю, прийом."])
++    assert len(contacts_live(tracker, t)) == 1
+-- 
+2.43.0
+
+
+From 18e21a9975b93c64032fc846276dec0f656a0400 Mon Sep 17 00:00:00 2001
+From: Nikita Nedoshovenko <nikita.nedoshovenko@outlook.com>
+Date: Sat, 21 Nov 2026 12:47:02 +0100
+Subject: [PATCH 2/4] Codenames in another case are not mishearings
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+'на Ромашці', 'біля Орієнтиру три', 'другої посадки' resolved to the right codename but were flagged
+'sounds alike; confirm', so the commonest Ukrainian report arrived as a draft. A Cyrillic name only ever
+reaches a place through the closed set of codenames and aliases, matched with case endings: no flag.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KG2RA2i89hGvASt44B7U7K
+---
+ tests/test_case_endings_not_doubt.py | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+ create mode 100644 tests/test_case_endings_not_doubt.py
+
+diff --git a/tests/test_case_endings_not_doubt.py b/tests/test_case_endings_not_doubt.py
+new file mode 100644
+index 0000000..23a5bda
+--- /dev/null
++++ b/tests/test_case_endings_not_doubt.py
+@@ -0,0 +1,20 @@
++"""A codename in another grammatical case is the same codename, not a mishearing: no "sounds alike; confirm"."""
++import asyncio
++
++import pytest
++
++from backend.geo import Gazetteer
++from backend.tracker import Tracker
++
++
++@pytest.mark.parametrize("line, anchor", [
++    ("Вежа, я Сокіл, на Ромашці, прийом.", "Ромашка"),
++    ("Вежа, я Лис, на Орієнтирі три, прийом.", "Орієнтир 3"),
++    ("Вежа, я Граніт, біля другої посадки, прийом.", "Друга посадка"),
++    ("Башня, я Лис, возле второй посадки, приём.", "Друга посадка"),
++])
++def test_inflected_codename_is_not_flagged(monkeypatch, line, anchor):
++    for key in ("GEMINI_API_KEY", "MISTRAL_API_KEY"):
++        monkeypatch.delenv(key, raising=False)
++    e = asyncio.run(Tracker(Gazetteer(), log=None).ingest(line, None, now=1e6))[0]
++    assert e["ok"] and e["anchor"] == anchor and not e["ambiguous"] and "sounds alike" not in (e.get("note") or "")
+-- 
+2.43.0
+
+
+From eddf8c581018b06655a1aa674c6c679ea3b846ee Mon Sep 17 00:00:00 2001
+From: Nikita Nedoshovenko <nikita.nedoshovenko@outlook.com>
+Date: Sat, 21 Nov 2026 12:47:02 +0100
+Subject: [PATCH 3/4] Place status: destroyed, damaged, blocked, reopened;
+ battle replay
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+'Міст біля Ромашки знищено, проїзду нема' / 'the bridge near the Odeon is destroyed' / 'road blocked at ...' is
+plotted as a persistent obstacle where it is (uk, ru, en, fr), without moving the reporter. A later report
+updates the same marker (damaged, then destroyed); 'reopened' / 'проїзд відкрито' takes it off the map, and
+rejecting that report puts it back. Obstacles never raise a threat warning.
+
+data/demo_net_battle.jsonl + 'Replay battle' button: three teams, a blown bridge confirmed by a second station,
+two waiting FPVs, a mine a team walks onto, a road blocked and reopened. tests/test_battle_script.py replays it.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KG2RA2i89hGvASt44B7U7K
+---
+ backend/app.py              |  5 ++-
+ backend/contact.py          | 54 ++++++++++++++++++++---
+ backend/contact_uk.py       | 20 +++++++++
+ backend/extract.py          |  6 +++
+ backend/tracker.py          | 13 +++++-
+ data/demo_net_battle.jsonl  | 22 ++++++++++
+ data/threat_vocab.csv       | 54 +++++++++++++++++++++++
+ frontend/src/App.vue        | 20 +++++----
+ tests/test_battle_script.py | 36 ++++++++++++++++
+ tests/test_place_status.py  | 86 +++++++++++++++++++++++++++++++++++++
+ 10 files changed, 297 insertions(+), 19 deletions(-)
+ create mode 100644 data/demo_net_battle.jsonl
+ create mode 100644 tests/test_battle_script.py
+ create mode 100644 tests/test_place_status.py
+
+diff --git a/backend/app.py b/backend/app.py
+index a10d7d6..ef7a99c 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -172,11 +172,12 @@ async def net_recording(request: Request, lang: str | None = None) -> dict:
+ @app.post("/net/replay")
+ async def net_replay(speed: float = 3.0, script: str = "en") -> dict:
+     """Play a demo net onto the net, `speed` times faster than scripted (its own clock keeps real gaps).
+-    script: "en" (data/demo_net.jsonl, English and French) or "uk" (data/demo_net_uk.jsonl, Ukrainian and Russian)."""
++    script: "en" (data/demo_net.jsonl, English and French), "uk" (data/demo_net_uk.jsonl, Ukrainian and Russian) or
++    "battle" (data/demo_net_battle.jsonl: three teams, a blown bridge, waiting FPVs, a mine, a blocked road reopened)."""
+     global replay_task
+     if replay_task and not replay_task.done():
+         raise HTTPException(409, "a replay is already running")
+-    path = DATA / ("demo_net_uk.jsonl" if script == "uk" else "demo_net.jsonl")
++    path = DATA / {"uk": "demo_net_uk.jsonl", "battle": "demo_net_battle.jsonl"}.get(script, "demo_net.jsonl")
+     if not path.exists():
+         raise HTTPException(404, f"no {path.name} for zone {zone.NAME}")
+     lines = [json.loads(s) for s in path.read_text(encoding="utf-8").splitlines() if s.strip()]
+diff --git a/backend/contact.py b/backend/contact.py
+index 51a1046..a0379b9 100644
+--- a/backend/contact.py
++++ b/backend/contact.py
+@@ -11,9 +11,42 @@ from __future__ import annotations
+ import re
+ 
+ WHATS = ["infantry", "sniper", "tank", "apc", "vehicle", "artillery", "drone", "helicopter", "aircraft", "ied", "civilians",
+-         "unknown"]
++         "obstacle", "unknown"]
+ # Threats named on their own are a sighting ("IED behind the town hall"); "vehicle" or "infantry" alone are not.
+-_ALWAYS = {"tank", "apc", "drone", "helicopter", "aircraft", "artillery", "ied", "sniper", "civilians"}
++_ALWAYS = {"tank", "apc", "drone", "helicopter", "aircraft", "artillery", "ied", "sniper", "civilians", "obstacle"}
++# The state of a PLACE, not a thing seen: "the bridge near the Odeon is destroyed", "road blocked", "bridge reopened".
++# Plotted like a persistent hazard (what "obstacle", detail "bridge destroyed"); "reopened" takes it off the map.
++OBSTACLE_STATES = [
++    ("reopened", r"re ?opened|repaired|passable|open again|now open|rouverte?s?|retablie?s?|reparee?s?"),
++    ("destroyed", r"destroyed|blown up|blown|collapsed|demolished|detruite?s?|effondree?s?"),
++    ("blocked", r"blocked|impassable|no passage|closed|cratered|bloquee?s?|coupee?s?|infranchissables?"),
++    ("damaged", r"damaged|endommagee?s?"),
++]
++_OBSTACLE = "|".join(v for _, v in OBSTACLE_STATES)
++_OBJECTS = {"bridge": r"bridges?|ponts?", "road": r"roads?|streets?|routes?|rues?|msr", "crossing": r"crossings?|junctions?|carrefours?",
++            "tunnel": r"tunnels?", "building": r"buildings?|batiments?|immeubles?", "station": r"stations?|gares?"}
++CLEARED = "reopened"
++
++
++def obstacle_detail(text: str) -> str | None:
++    """"bridge destroyed" / "road blocked" / "reopened": the state, with the kind of object when it is named."""
++    said = {k for k, v in OBSTACLE_STATES if re.search(rf"\b(?:{v})\b", text)}
++    state = next((s for s in ("destroyed", "blocked", "damaged", CLEARED) if s in said), None)   # the worst one said
++    if state is None:
++        return None
++    obj = next((k for k, v in _OBJECTS.items() if re.search(rf"\b(?:{v})\b", text)), None)
++    return f"{obj} {state}" if obj else state
++
++
++def object_only(clause: str) -> bool:
++    """"the bridge" on its own, cut off from "near the Odeon is destroyed" by the clause splitter: not a position."""
++    return bool(re.fullmatch(rf"(?:the |le |la |les |l )?(?:{'|'.join(_OBJECTS.values())})", clause.strip()))
++
++
++def cleared(c: dict | None) -> bool:
++    """Is this the report that an obstacle is gone ("bridge reopened", "проїзд відкрито")?"""
++    c = c or {}
++    return c.get("what") == "obstacle" and str(c.get("detail") or "").endswith(CLEARED)
+ SIDES = ["hostile", "unknown", "friendly", "neutral"]
+ ACTIVITIES = ["moving", "static", "firing", None]
+ 
+@@ -30,6 +63,7 @@ _WHAT = [
+     ("vehicle", r"vehicles?|trucks?|technicals?|pick ?ups?|vehicules?|camions?"),
+     ("infantry", r"infantry|troops|soldiers|personnel|squad|platoon|dismounts?|fantassins?|soldats?|combattants?"),
+     ("civilians", r"civilians?|refugees?|civils?|crowd|foule|refugies?"),
++    ("obstacle", _OBSTACLE),
+ ]
+ WHAT_RE = "|".join(f"(?P<{k}>\\b(?:{v})\\b)" for k, v in _WHAT)
+ 
+@@ -78,7 +112,10 @@ def describe(clauses: list[str], number) -> dict:
+         hm = re.search(_MOVING + r"\s+" + _HEADING, text)
+         if hm:
+             heading = _FR_DIRS.get(hm.group("h"), hm.group("h"))
+-    return {"what": what, "side": side, "count": int(count) if count else None, "activity": activity, "heading": heading}
++    out = {"what": what, "side": side, "count": int(count) if count else None, "activity": activity, "heading": heading}
++    if what == "obstacle":   # a place's state: no side, no count, it does not move, and it stays until reported open
++        out.update(side="unknown", count=None, activity=None, heading=None, detail=obstacle_detail(text), ttl_s=TTL_S["obstacle"])
++    return out
+ 
+ 
+ def location_clauses(clauses: list[str]) -> list[str]:
+@@ -89,6 +126,7 @@ def location_clauses(clauses: list[str]) -> list[str]:
+         c = re.sub(_MOVING + r"\s+" + _HEADING, " ", c)
+         c = re.sub(_MOVING + r"\s+(?:towards?|to|vers)\s+.*", " ", c)   # a destination, not where it is now
+         c = re.sub(r"\b(?:contact|spotted|sighted|observed|i see|we see|i can see|we can see|repere|on voit|je vois)\b", " ", c)
++        c = re.sub(rf"\b(?:(?:is|are|was|has been|have been|est|sont) )?(?:now |completely |totally |partly )?(?:{_OBSTACLE})\b", " ", c)
+         c = re.sub(r"\s+", " ", c).strip(" ,")
+         if c:
+             out.append(c)
+@@ -133,12 +171,12 @@ def validate(c: dict | None) -> dict:
+ 
+ # How long a sighting stays current (the map fades it after this): a drone has moved on in minutes, an IED stays.
+ # frontend/src/App.vue (CONTACT_TTL_S) mirrors this table.
+-TTL_S = {"drone": 180, "helicopter": 300, "aircraft": 120, "artillery": 600, "sniper": 1800, "ied": 86400,
++TTL_S = {"drone": 180, "helicopter": 300, "aircraft": 120, "artillery": 600, "sniper": 1800, "ied": 86400, "obstacle": 86400,
+          "civilians": 1800}
+ DEFAULT_TTL_S = 900
+ # How far a contact can plausibly have moved between two reports, for deciding whether two sightings are one.
+ SPEED_MPS = {"infantry": 1.5, "sniper": 1.0, "civilians": 1.5, "tank": 8.0, "apc": 10.0, "vehicle": 12.0,
+-             "drone": 15.0, "helicopter": 40.0, "aircraft": 100.0, "artillery": 0.0, "ied": 0.0, "unknown": 3.0}
++             "drone": 15.0, "helicopter": 40.0, "aircraft": 100.0, "artillery": 0.0, "ied": 0.0, "obstacle": 0.0, "unknown": 3.0}
+ SAME_PLACE_M = 75        # two sightings this close (edge to edge, plus movement) can be the same thing
+ WARN_M = 300             # a friendly unit this close to a hostile contact is warned
+ # Things that hurt whoever walks up to them, whoever owns them: a waiting FPV ("ждун"), a mine, a tripwire, a gun, a
+@@ -174,6 +212,8 @@ def compatible(a: dict, b: dict) -> bool:
+         return False
+     # Two named types that differ are two things: a Shahed is not the recon quad seen a minute ago. A generic word
+     # ("drone", "пташка") can still be either.
++    if a["what"] == b["what"] == "obstacle":   # damaged, then destroyed, then reopened: one place, its state changing
++        return True
+     generic = {None, "drone", "quadcopter", "vehicle", "infantry", "group of people", "fixed-wing drone"}
+     if a.get("detail") not in generic and b.get("detail") not in generic and a.get("detail") != b.get("detail"):
+         return False
+@@ -207,14 +247,14 @@ def persistent(c: dict | None) -> bool:
+     """Static hazards (mines, IEDs, fibre-optic cables, drones waiting on the ground) are never removed by age: nobody
+     radios "mine cleared". Past their fresh window they stay on the map as "unconfirmed, N h old"."""
+     c = c or {}
+-    return c.get("what") == "ied" or (c.get("ttl_s") or 0) >= 1800
++    return c.get("what") in ("ied", "obstacle") or (c.get("ttl_s") or 0) >= 1800
+ 
+ 
+ # --- APP-6 / MIL-STD-2525C symbol codes, for exports (frontend/src/App.vue draws the same codes) -------------------
+ _SIDE_CODE = {"hostile": "H", "unknown": "U", "neutral": "N", "friendly": "F"}
+ _FUNCTION = {"infantry": "GPUCI", "sniper": "GPUCIS", "tank": "GPEVAT", "apc": "GPEVAA", "vehicle": "GPEV",
+              "artillery": "GPUCF", "drone": "APMFQ", "helicopter": "APMH", "aircraft": "APMF", "ied": "GPEXI",
+-             "civilians": "GP", "unknown": "GP"}
++             "civilians": "GP", "obstacle": "GP", "unknown": "GP"}
+ OWN_UNIT = "GPUCI"   # friendly infantry
+ 
+ 
+diff --git a/backend/contact_uk.py b/backend/contact_uk.py
+index 145ac3f..b047a52 100644
+--- a/backend/contact_uk.py
++++ b/backend/contact_uk.py
+@@ -92,6 +92,21 @@ def heading(text: str) -> str | None:
+     return None
+ 
+ 
++OBJECTS = {"bridge": _alt("міст", "мост", "моста", "мосту", "місток"), "road": _alt("дорога", "дорогу", "дороги", "вулиця", "улица", "траса", "трасса"),
++           "crossing": _alt("переправа", "переправу", "перехрестя", "перекресток"), "tunnel": _alt("тунель", "туннель"),
++           "building": _alt("будівля", "будинок", "здание", "дом")}
++
++
++_STATE_INDEX = [(r["detail"], lang_uk.index_of({r["spoken"]: "x"})) for r in ROWS if r["what"] == "obstacle"]
++_SEVERITY = ["destroyed", "blocked", "damaged", "reopened"]
++
++
++def obstacle_state(text: str) -> str | None:
++    """"міст знищено, проїзду нема" names two states; the worst one is the news."""
++    said = {state for state, index in _STATE_INDEX if lang_uk.lookup(text, index)}
++    return next((s for s in _SEVERITY if s in said), None)
++
++
+ def describe(text: str) -> dict:
+     t = fold(text)
+     row = threat(text)
+@@ -109,6 +124,11 @@ def describe(text: str) -> dict:
+     activity = ("firing" if re.search(rf"\b{FIRING}\b", t) else "static" if re.search(rf"\b{STATIC}\b", t)
+                 or (row and int(row["ttl_s"] or 0) >= 1800 and what == "drone") else "moving" if head
+                 or re.search(rf"\b{MOVING}\b", t) else None)
++    if what == "obstacle":   # the state of a place ("міст знищено"): no side, no count, never moves
++        obj = next((k for k, v in OBJECTS.items() if re.search(rf"\b{v}\b", t)), None)
++        return {"what": what, "side": "unknown", "count": None, "activity": None, "heading": None,
++                "detail": " ".join(filter(None, [obj, obstacle_state(text) or row["detail"]])), "ttl_s": int(row["ttl_s"]),
++                "word": row["spoken"], "another": False}
+     return {"what": what, "side": side, "count": int(count) if count else None, "activity": activity, "heading": head,
+             "detail": (row or {}).get("detail") or ("group of people" if what == "infantry" else None),
+             "ttl_s": int(row["ttl_s"]) if row and row.get("ttl_s") else (900 if what == "infantry" else None),
+diff --git a/backend/extract.py b/backend/extract.py
+index 695a804..c85764d 100644
+--- a/backend/extract.py
++++ b/backend/extract.py
+@@ -81,6 +81,9 @@ Rules:
+   subject null, the anchor fields saying where the THING is, plus
+   "contact": {{"what": one of {contact.WHATS}, "side": one of {contact.SIDES}, "count": number or null,
+               "activity": "moving" | "static" | "firing" | null, "heading": compass direction or null}}.
++  A PLACE reported destroyed, damaged, blocked or reopened ("the bridge near the Odeon is destroyed", "міст біля Ромашки
++  знищено, проїзду нема"): what "obstacle", side "unknown", plus "detail": the object and state in English, e.g.
++  "bridge destroyed", "road blocked", "building damaged", "bridge reopened". The anchor is where it is.
+   side is "hostile" ONLY if the speaker says enemy/hostile; never infer it. Otherwise "unknown" (civilians: "neutral").
+   "300 m east of me" -> anchor {{"name": "me", "kind": "unit"}}, relation "east_of", distance_m 300.
+   "moving north" is the heading, not the location. The speaker's own position, if also given, is its own report.
+@@ -520,6 +523,9 @@ def stub_extract(text: str) -> dict:
+         r = next((x for x in map(_parse_clause, contact.location_clauses(sighting)) if x and x["type"] == "position"), None)
+         r = contact.self_anchor({**(r or _other()), "subject": None, "type": "contact"}, speaker)
+         r["contact"] = contact.describe(sighting, _number)
++        if r["contact"]["what"] == "obstacle":   # "the bridge / near the Odeon is destroyed": the object may sit in an earlier clause
++            r["contact"]["detail"] = contact.obstacle_detail(t) or r["contact"]["detail"]
++            clauses = [c for c in clauses if not contact.object_only(c)]
+         reports.append(r)
+     for clause in clauses:
+         m = re.match(rf"(?P<s>{_CS})\s+(?:is|est)\b\s*", clause)
+diff --git a/backend/tracker.py b/backend/tracker.py
+index 9184949..2ea3a3d 100644
+--- a/backend/tracker.py
++++ b/backend/tracker.py
+@@ -101,6 +101,15 @@ class Tracker:
+         event.update({k: v for k, v in result.items() if k != "_geom"})
+         if event["ok"] and geom is not None:
+             same = self._same_track(event["contact"], geom, now)
++            if contacts.cleared(event["contact"]):   # "bridge reopened": the obstacle on record there leaves the map
++                if same:
++                    event.update(callsign=same, merged_with=self.tracks[same]["id"], cleared=True,
++                                 seen_by=[s for s in [reporter] if s], corroborated=False, threats=[])
++                    del self.tracks[same]
++                else:
++                    event.update(ok=False, note="no obstacle on record there")
++                self.events.append(event)
++                return event
+             if same:   # seen before: one enemy, more evidence, not a second enemy
+                 track = self.tracks[same]
+                 event.update(callsign=same, merged_with=track["id"],
+@@ -139,12 +148,12 @@ class Tracker:
+     def _withdraw(self, event: dict) -> None:
+         if event.get("type") == "contact":
+             track = self.tracks.get(event["callsign"])
+-            if track and track["id"] == event["id"]:
++            if event.get("cleared") or (track and track["id"] == event["id"]):   # a rejected "reopened" puts it back
+                 prev = next((e for e in reversed(self.events) if e["callsign"] == event["callsign"] and e["id"] != event["id"]
+                              and e.get("ok") and e.get("region") and not e.get("superseded")), None)
+                 if prev:
+                     self._track(prev, self.gaz.proj.to_xy(shape(prev["region"])))
+-                else:
++                elif track:
+                     del self.tracks[event["callsign"]]
+         else:
+             fixes = self.history.get(event["callsign"]) or []
+diff --git a/data/demo_net_battle.jsonl b/data/demo_net_battle.jsonl
+new file mode 100644
+index 0000000..72090b2
+--- /dev/null
++++ b/data/demo_net_battle.jsonl
+@@ -0,0 +1,22 @@
++{"t": 0, "text": "Всім, я Вежа, перевірка зв'язку, прийом."}
++{"t": 5, "text": "Вежа, я Сокіл, на Ромашці, прийом."}
++{"t": 11, "text": "Вежа, я Граніт, сто метрів на південь від Сараю, прийом."}
++{"t": 17, "text": "Башня, я Лис, между Ромашкой и второй посадкой, приём."}
++{"t": 23, "text": "Плюс, всім, я Вежа, працюємо."}
++{"t": 40, "text": "Вежа, я Сокіл, міст біля Ромашки знищено, проїзду нема, прийом."}
++{"t": 47, "text": "Сокіл, я Вежа, плюс, прийом."}
++{"t": 54, "text": "Башня, я Лис, подтверждаю, мост возле Ромашки взорван, приём."}
++{"t": 62, "text": "Всім, я Вежа, міст біля Ромашки знищено, прийом."}
++{"t": 80, "text": "Вежа, я Граніт, ждун біля Сараю, метрів п'ятдесят на захід, не підходити, прийом."}
++{"t": 88, "text": "Вежа, я Граніт, ще один ждун сто метрів на схід від Сараю, прийом."}
++{"t": 96, "text": "Вежа, я Граніт, передаю від сусідів, міна на стежці біля Орієнтиру три, прийом."}
++{"t": 104, "text": "Плюс, Граніт."}
++{"t": 115, "text": "Лис, я Вежа, висувайся до Орієнтиру три, обережно, там міна на стежці, прийом."}
++{"t": 120, "text": "Вежа, я Лис, плюс, висуваюсь, прийом."}
++{"t": 175, "text": "Вежа, я Лис, на Орієнтирі три, обходжу, прийом."}
++{"t": 195, "text": "Башня, я Сокол, противник, трое, восточнее Ромашки метров двести, двигаются на юг, приём."}
++{"t": 205, "text": "Вежа, я Лис, мопед пройшов над Люксембурзьким палацом на захід, прийом."}
++{"t": 215, "text": "Вежа, я Граніт, ворожий танк біля Сараю, стоїть, прийом."}
++{"t": 230, "text": "Вежа, я Граніт, дорогу біля другої посадки завалило, не проїхати, прийом."}
++{"t": 250, "text": "Вежа, я Граніт, дорогу біля другої посадки розчищено, проїзд відкрито, прийом."}
++{"t": 258, "text": "Всім, я Вежа, прийняв, кінець зв'язку."}
+diff --git a/data/threat_vocab.csv b/data/threat_vocab.csv
+index eb1bca1..5f7bc9f 100644
+--- a/data/threat_vocab.csv
++++ b/data/threat_vocab.csv
+@@ -77,3 +77,57 @@ fpv,en,drone,FPV,90,,check,
+ цивільні,uk,civilians,civilians,1800,,sourced,
+ гражданские,ru,civilians,civilians,1800,,sourced,
+ мирні,uk,civilians,civilians,1800,,check,
++знищено,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++знищений,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++знищена,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++зруйновано,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++зруйнований,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++зруйнована,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++підірвано,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++підірваний,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++уничтожен,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++уничтожено,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++разрушен,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++разрушено,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++взорван,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++подорван,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++заблоковано,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++перекрито,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++проїзду нема,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++проїзду немає,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++проходу нема,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++завал,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++заблокирован,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++перекрыт,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++проезда нет,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++прохода нет,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++пошкоджено,uk,obstacle,damaged,86400,,check,state of a place (bridge road building); stays until reported open
++пошкоджений,uk,obstacle,damaged,86400,,check,state of a place (bridge road building); stays until reported open
++пошкоджена,uk,obstacle,damaged,86400,,check,state of a place (bridge road building); stays until reported open
++поврежден,ru,obstacle,damaged,86400,,check,state of a place (bridge road building); stays until reported open
++повреждено,ru,obstacle,damaged,86400,,check,state of a place (bridge road building); stays until reported open
++відновлено,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
++проїзд відкрито,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
++розблоковано,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
++розчищено,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
++восстановлен,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
++проезд открыт,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
++разблокирован,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
++расчищен,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
++підірвали,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++розбито,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++розбитий,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++впав,uk,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++взорвали,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++разбит,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++рухнул,ru,obstacle,destroyed,86400,,check,state of a place (bridge road building); stays until reported open
++не проїхати,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++завалило,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++завалено,uk,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++не проехать,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++завалило,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++завален,ru,obstacle,blocked,86400,,check,state of a place (bridge road building); stays until reported open
++прохід відкрито,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
++можна їхати,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
++проход открыт,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
++можно ехать,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+diff --git a/frontend/src/App.vue b/frontend/src/App.vue
+index 0100cd7..53d353c 100644
+--- a/frontend/src/App.vue
++++ b/frontend/src/App.vue
+@@ -22,16 +22,18 @@ const SIDE = { hostile: { code: 'H', colour: '#f87171', word: 'enemy' }, unknown
+ const WHAT = { infantry: ['GPUCI', 'infantry'], sniper: ['GPUCIS', 'sniper'], tank: ['GPEVAT', 'tank'],
+   apc: ['GPEVAA', 'armoured vehicle'], vehicle: ['GPEV', 'vehicle'], artillery: ['GPUCF', 'artillery'],
+   drone: ['APMFQ', 'drone'], helicopter: ['APMH', 'helicopter'], aircraft: ['APMF', 'aircraft'], ied: ['GPEXI', 'IED'],
+-  civilians: ['GP', 'civilians'], unknown: ['GP', 'contact'] }
++  civilians: ['GP', 'civilians'], obstacle: ['GP', 'obstacle'], unknown: ['GP', 'contact'] }
+ // How long a sighting stays on the map: a drone has moved on within minutes, an IED stays where it is.
+-const CONTACT_TTL_S = { drone: 180, helicopter: 300, aircraft: 120, artillery: 600, sniper: 1800, ied: 86400, civilians: 1800 }
++const CONTACT_TTL_S = { drone: 180, helicopter: 300, aircraft: 120, artillery: 600, sniper: 1800, ied: 86400, obstacle: 86400, civilians: 1800 }
+ const contactTtl = (c) => c?.ttl_s || CONTACT_TTL_S[c?.what] || 900
+ // Static hazards (mines, IEDs, cables, drones waiting on the ground) never vanish: nobody radios "mine cleared".
+ // Past their fresh window they stay, dashed, as "unconfirmed, N h old". Same rule as backend/contact.py persistent().
+-const persistent = (c) => c?.what === 'ied' || (c?.ttl_s || 0) >= 1800
++const persistent = (c) => ['ied', 'obstacle'].includes(c?.what) || (c?.ttl_s || 0) >= 1800
+ const age = (t) => { const s = Math.max(0, now.value - t); return s < 3600 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} days` }
+ const HEADING_DEG = { north: 0, northeast: 45, east: 90, southeast: 135, south: 180, southwest: 225, west: 270, northwest: 315 }
+-const sideOf = (c) => SIDE[c?.side] || SIDE.unknown
++// A destroyed bridge or a blocked road is the state of a place, not somebody's kit: its own colour, no side wording.
++const OBSTACLE = { code: 'U', colour: '#fb7185', word: '' }
++const sideOf = (c) => (c?.what === 'obstacle' ? OBSTACLE : SIDE[c?.side] || SIDE.unknown)
+ const sidc = (c, doubt) => {
+   const f = (WHAT[c?.what] || WHAT.unknown)[0]
+   return `S${sideOf(c).code}${f[0]}${doubt ? 'A' : 'P'}${f.slice(2)}`.padEnd(15, '-')
+@@ -42,7 +44,7 @@ function describeContact(c, { spoken = false } = {}) {
+   const what = c.detail || (WHAT[c.what] || WHAT.unknown)[1]   // detail: "FPV waiting on the ground", "Shahed"
+   const n = c.count > 1 ? (spoken ? `${c.count} ` : `${c.count}× `) : ''
+   const side = sideOf(c).word ? `${sideOf(c).word} ` : ''
+-  const unknown = c.side === 'unknown' || !SIDE[c.side] ? (spoken ? ', side unknown' : ' (side unknown)') : ''
++  const unknown = c.what !== 'obstacle' && (c.side === 'unknown' || !SIDE[c.side]) ? (spoken ? ', side unknown' : ' (side unknown)') : ''
+   const act = c.activity === 'moving' ? `, moving${c.heading ? ' ' + c.heading : ''}` : c.activity ? `, ${c.activity}` : ''
+   return `${n}${side}${what}${unknown}${act}`
+ }
+@@ -136,6 +138,7 @@ const contactsOnMap = computed(() => {
+   const latest = new Map(), confirmed = new Set()
+   visible.value.forEach((e) => {
+     if (!isContact(e) || !e.ok || e.superseded) return
++    if (e.cleared) { latest.delete(e.callsign); return }   // "bridge reopened": off the map
+     latest.set(e.callsign, e)
+     if (e.confirmed) confirmed.add(e.callsign)
+   })
+@@ -433,8 +436,8 @@ async function netSend(body = netText.value.trim()) {
+   await fetch('/api/net/text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: body }) })
+ }
+ 
+-async function replayDemo() {
+-  const script = ['uk', 'ru'].includes(lang.value) ? 'uk' : 'en'   // the Ukrainian/Russian demo net, or the English/French one
++async function replayDemo(which) {
++  const script = which === 'battle' ? 'battle' : ['uk', 'ru'].includes(lang.value) ? 'uk' : 'en'   // the Ukrainian/Russian demo net, or the English/French one
+   const r = await fetch(`/api/net/replay?speed=3&script=${script}`, { method: 'POST' })
+   const out = await r.json().catch(() => ({}))
+   netMsg.value = r.ok ? `replaying ${out.lines} transmissions over ~${out.seconds} s (3× speed)` : out.detail || `replay failed (${r.status})`
+@@ -743,7 +746,8 @@ onUnmounted(() => {
+           <label class="filebtn" :class="{ on: netSource === 'file' }">{{ netSource === 'file' ? 'Playing…' : 'Play a recording' }}
+             <input type="file" accept="audio/*" @change="netFile" />
+           </label>
+-          <button type="button" class="quiet" @click="replayDemo">Replay demo net</button>
++          <button type="button" class="quiet" @click="replayDemo()">Replay demo net</button>
++          <button type="button" class="quiet" @click="replayDemo('battle')" title="Ukrainian net: a blown bridge, waiting FPVs, a mine, a blocked road reopened">Replay battle</button>
+           <select v-model="lang" title="Speech language"><option value="en">EN</option><option value="fr">FR</option><option value="uk">UK</option><option value="ru">RU</option><option value="auto">Auto</option></select>
+         </div>
+         <div class="meter" :title="netSpeaking ? 'transmission in progress' : 'channel quiet'">
+diff --git a/tests/test_battle_script.py b/tests/test_battle_script.py
+new file mode 100644
+index 0000000..f550f88
+--- /dev/null
++++ b/tests/test_battle_script.py
+@@ -0,0 +1,36 @@
++"""The battle replay (data/demo_net_battle.jsonl) tells the story the demo needs, end to end, with rules only."""
++import asyncio
++import json
++from pathlib import Path
++
++from backend.geo import Gazetteer
++from backend.net import Net
++from backend.tracker import Tracker
++
++SCRIPT = Path(__file__).resolve().parent.parent / "data" / "demo_net_battle.jsonl"
++
++
++def test_battle_replay(monkeypatch):
++    for key in ("GEMINI_API_KEY", "MISTRAL_API_KEY"):
++        monkeypatch.delenv(key, raising=False)
++
++    async def go():
++        tracker = Tracker(Gazetteer(), log=None)
++        net, events, t = Net(tracker, log=None), [], 0
++        for s in SCRIPT.read_text(encoding="utf-8").splitlines():
++            line = json.loads(s)
++            t = 1e6 + line["t"]
++            events += (await net.hear(line["text"], now=t, source="radio-text"))["events"]
++        return tracker, events, t
++    tracker, events, t = asyncio.run(go())
++    picture = tracker.picture(now=t)
++    units = {e["callsign"]: e["anchor"] for e in picture if e.get("type") != "contact"}
++    seen = sorted((e["contact"].get("detail") or e["contact"]["what"]) for e in picture if e.get("type") == "contact")
++    assert units == {"сокіл": "Ромашка", "граніт": "Сарай", "лис": "Орієнтир 3"}
++    assert seen.count("FPV waiting on the ground") == 2 and "bridge destroyed" in seen and "mine" in seen
++    assert "road blocked" not in seen                                   # reported, then reopened
++    assert not any("sounds alike" in (e.get("note") or "") and e["callsign"] != "contact 6" for e in events)
++    arrived = next(e for e in events if e["callsign"] == "лис" and e.get("anchor") == "Орієнтир 3" and e.get("ok"))
++    assert [w["contact"]["what"] for w in arrived["threats"]] == ["ied"]   # walked onto the reported mine: warned
++    bridge = [e for e in events if (e.get("contact") or {}).get("detail") == "bridge destroyed"]
++    assert bridge[1]["corroborated"]                                      # two stations saw it
+diff --git a/tests/test_place_status.py b/tests/test_place_status.py
+new file mode 100644
+index 0000000..1e65d80
+--- /dev/null
++++ b/tests/test_place_status.py
+@@ -0,0 +1,86 @@
++"""The state of a place: "the bridge is destroyed", "міст знищено, проїзду нема", "road reopened". It is plotted like a
++persistent hazard, updated when the state changes, and taken off the map when someone reports it open again."""
++import asyncio
++
++import pytest
++
++from backend.geo import Gazetteer
++from backend.tracker import Tracker
++
++
++@pytest.fixture(autouse=True)
++def rules_only(monkeypatch):
++    for key in ("GEMINI_API_KEY", "MISTRAL_API_KEY"):
++        monkeypatch.delenv(key, raising=False)
++
++
++def run(lines, step=30):
++    async def go():
++        tracker, t, out = Tracker(Gazetteer(), log=None), 1e6, []
++        for line in lines:
++            out += await tracker.ingest(line, None, now=t)
++            t += step
++        return tracker, out, t
++    return asyncio.run(go())
++
++
++def obstacles(tracker, t):
++    return [e["contact"]["detail"] for e in tracker.picture(now=t) if (e.get("contact") or {}).get("what") == "obstacle"]
++
++
++@pytest.mark.parametrize("line, anchor, detail", [
++    ("Вежа, я Лис, міст біля Ромашки знищено, проїзду нема, прийом.", "Ромашка", "bridge destroyed"),
++    ("Вежа, я Граніт, дорога біля Сараю перекрита, завал, прийом.", "Сарай", "road blocked"),
++    ("Башня, я Гранит, мост возле Сарая взорван, приём.", "Сарай", "bridge destroyed"),
++    ("Zero, this is Bravo one, the bridge near the Odeon theatre is destroyed, no passage, over",
++     "Odéon–Théâtre de l'Europe", "bridge destroyed"),
++    ("Zero, this is Alpha two, road blocked at the Saint-Sulpice church, over", "Église Saint-Sulpice", "road blocked"),
++    ("Zero, this is Delta one, building damaged south of the town hall, over", "Mairie du 6e arrondissement",
++     "building damaged"),
++])
++def test_place_state_is_plotted_where_it_is(line, anchor, detail):
++    _, events, _ = run([line])
++    e = events[0]
++    assert e["type"] == "contact" and e["ok"] and e["anchor"] == anchor
++    assert e["contact"]["what"] == "obstacle" and e["contact"]["detail"] == detail and e["contact"]["side"] == "unknown"
++    assert len(events) == 1   # the reporter's own position is not moved to the bridge
++
++
++def test_state_change_updates_one_marker():
++    tracker, events, t = run(["Вежа, я Лис, міст біля Ромашки пошкоджено, прийом.",
++                              "Вежа, я Сокіл, міст біля Ромашки знищено, прийом."])
++    assert obstacles(tracker, t) == ["bridge destroyed"] and events[1]["merged_with"] == events[0]["id"]
++    assert events[1]["corroborated"]   # two stations
++
++
++def test_it_stays_for_a_day_and_never_warns_as_a_threat():
++    tracker, events, t = run(["Вежа, я Лис, міст біля Ромашки знищено, прийом.", "Вежа, я Сокіл, на Ромашці, прийом."])
++    assert events[1]["threats"] == [] and obstacles(tracker, t + 20 * 3600) == ["bridge destroyed"]
++
++
++@pytest.mark.parametrize("down, up", [
++    ("Вежа, я Лис, міст біля Ромашки знищено, прийом.", "Вежа, я Лис, міст біля Ромашки відновлено, проїзд відкрито, прийом."),
++    ("Zero, this is Alpha two, road blocked at the Saint-Sulpice church, over",
++     "Zero, this is Alpha two, road at the Saint-Sulpice church reopened, over"),
++])
++def test_reopened_takes_it_off_the_map(down, up):
++    tracker, events, t = run([down, up])
++    assert events[1]["cleared"] and events[1]["callsign"] == events[0]["callsign"] and obstacles(tracker, t) == []
++
++
++def test_rejecting_the_reopened_report_puts_it_back():
++    tracker, events, t = run(["Zero, this is Alpha two, road blocked at the Saint-Sulpice church, over",
++                              "Zero, this is Alpha two, road at the Saint-Sulpice church reopened, over"])
++    tracker.reject(events[1]["id"])
++    assert obstacles(tracker, t) == ["road blocked"]
++
++
++def test_reopened_with_nothing_on_record_is_not_plotted():
++    tracker, events, t = run(["Zero, this is Alpha two, road at the Saint-Sulpice church reopened, over"])
++    assert not events[0]["ok"] and obstacles(tracker, t) == []
++
++
++def test_a_destroyed_tank_is_still_a_tank_and_all_clear_is_not_an_obstacle():
++    _, events, _ = run(["Zero, this is Bravo one, contact, enemy tank destroyed at the Odeon theatre, over",
++                        "Zero, this is Bravo one, all clear at the Medici fountain, over"])
++    assert events[0]["contact"]["what"] == "tank" and events[1]["type"] == "position"
+-- 
+2.43.0
+
+
+From 3269db33ae2eebeef7af1dd69839ed50c33ca7a0 Mon Sep 17 00:00:00 2001
+From: Nikita Nedoshovenko <nikita.nedoshovenko@outlook.com>
+Date: Sat, 21 Nov 2026 13:10:59 +0100
+Subject: [PATCH 4/4] Rules path: negation, hearsay, two units per call, clock
+ method, own drones
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Found by reading through the offline rules with odd but realistic calls:
+- 'no enemy at the Odeon', 'біля Сараю противника немає', 'біля Сараю чисто' and 'reported there yesterday' moved the
+  speaker to that place, and the Ukrainian one painted an enemy there. They now plot nothing and move nobody.
+- 'Сокіл на Сараї, я на Ромашці' put the speaker at Сарай. Each unit named now gets its own fix.
+- 'наблюдаю' / 'бачу' with nothing named made an unlocated phantom contact.
+- 'на Орієнтирі три, міну бачу': a sighting with no place of its own is where the speaker just said he is.
+- 'стою возле Сарая, метрів п'ятдесят на північ' dropped the offset.
+- Clock method ('на дванадцяту годину, двісті метрів'): a ring at that distance, since the net does not know which
+  way the speaker faces. It used to fuzzy-match the hour to a place.
+- 'наша пташка' / 'our drone' is friendly and warns nobody.
+- /net/recording: one clip that fails speech-to-text no longer loses the rest. Whisper in Auto language gets the
+  Ukrainian prompt on a Cyrillic net.
+Benchmark (scripts.stress --offline, Paris and Irpin, train and holdout): unchanged.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KG2RA2i89hGvASt44B7U7K
+---
+ backend/app.py               |  9 +++-
+ backend/contact.py           |  3 +-
+ backend/contact_uk.py        | 25 ++++++++--
+ backend/extract.py           |  8 +++
+ backend/lang_uk.py           | 79 +++++++++++++++++++++++++++---
+ backend/stt.py               | 12 ++++-
+ data/demo_net_battle.jsonl   |  2 +-
+ data/threat_vocab.csv        |  4 ++
+ tests/test_place_status.py   |  7 +++
+ tests/test_review_round_2.py | 94 ++++++++++++++++++++++++++++++++++++
+ 10 files changed, 228 insertions(+), 15 deletions(-)
+ create mode 100644 tests/test_review_round_2.py
+
+diff --git a/backend/app.py b/backend/app.py
+index ef7a99c..4af4682 100644
+--- a/backend/app.py
++++ b/backend/app.py
+@@ -160,13 +160,18 @@ async def net_recording(request: Request, lang: str | None = None) -> dict:
+         raise HTTPException(400, f"not a PCM WAV file: {err}") from err
+     base = time.time() - (clips[-1][1] if clips else 0)
+     out = []
++    failed = 0
+     for start, end, clip in clips:
+-        heard = await stt.transcribe(clip, net.vocabulary(), lang)
++        try:   # one clip the provider chokes on must not lose the rest of the recording
++            heard = await stt.transcribe(clip, net.vocabulary(), lang)
++        except Exception:
++            failed += 1
++            continue
+         if heard["text"]:
+             got = await publish_net(await net.hear(heard["text"], now=base + start, duration=end - start,
+                                                    source="radio", stt=heard))
+             out += got["transmissions"]
+-    return {"segments": len(clips), "transmissions": out}
++    return {"segments": len(clips), "failed": failed, "transmissions": out}
+ 
+ 
+ @app.post("/net/replay")
+diff --git a/backend/contact.py b/backend/contact.py
+index a0379b9..14bcdcb 100644
+--- a/backend/contact.py
++++ b/backend/contact.py
+@@ -99,7 +99,8 @@ def describe(clauses: list[str], number) -> dict:
+     m = re.search(WHAT_RE, text)   # the first thing named; at one spot, the earlier entry in _WHAT wins
+     what = m.lastgroup if m else "artillery" if re.search(r"\bincoming\b", text) else "unknown"
+     side = ("hostile" if re.search(_HOSTILE, text) else "neutral" if re.search(_NEUTRAL, text)
+-            else "friendly" if re.search(_FRIENDLY, text) else "unknown")
++            else "friendly" if re.search(_FRIENDLY, text) or re.search(rf"\b(?:our|own|notre|nos)\s+(?:\w+\s+)?(?:{WHAT_RE})", text)
++            else "unknown")
+     count = None
+     m = re.search(rf"(?P<n>\d+|\b(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|twelve|twenty|un|une|deux|trois|quatre|cinq|six|dix)\b)"
+                   rf"\s+(?:(?:enemy|hostile|ennemis?|enemies|civilian|armou?red|light|heavy|small|large|\w+)\s+)?(?:{WHAT_RE})", text)
+diff --git a/backend/contact_uk.py b/backend/contact_uk.py
+index b047a52..86f2eab 100644
+--- a/backend/contact_uk.py
++++ b/backend/contact_uk.py
+@@ -31,7 +31,17 @@ def _load() -> list[dict]:
+ 
+ 
+ ROWS = _load()
+-_INDEX = lang_uk.index_of({r["spoken"]: str(i) for i, r in enumerate(ROWS)})
++# Threat nouns are matched with case endings ("ждуна", "міною"). The state of a place is said with participles
++# ("перекрито", "знищений"), and a loose match on those catches ordinary nouns ("перехрестя", "перекресток"), so
++# they are matched strictly: the listed form, give or take its ending.
++_INDEX = lang_uk.index_of({r["spoken"]: str(i) for i, r in enumerate(ROWS) if r["what"] != "obstacle"})
++
++
++def _strict(phrase: str) -> str:
++    return r"\b" + r"\s+".join(re.escape(w[:-1]) + r"\w{0,3}" if len(w) > 4 else re.escape(w) for w in fold(phrase).split()) + r"\b"
++
++
++_OBSTACLE_ROWS = [(re.compile(_strict(r["spoken"])), r) for r in ROWS if r["what"] == "obstacle"]
+ _WORDS = _alt(*[r["spoken"] for r in ROWS]) if ROWS else r"(?!x)x"
+ 
+ HOSTILE = _alt("ворог", "ворога", "ворожий", "ворожа", "ворожі", "противник", "противника", "вражеский", "вражеская",
+@@ -41,6 +51,8 @@ TRIGGER = _alt("контакт", "бачу", "вижу", "спостерігаю
+ COUNT_WORDS = {fold(k): v for k, v in {
+     "двох": 2, "двоє": 2, "двоих": 2, "двое": 2, "трьох": 3, "троє": 3, "троих": 3, "трое": 3, "чотирьох": 4,
+     "четверо": 4, "четверых": 4, "п'ятьох": 5, "пятеро": 5, "пятерых": 5, "групу": None, "группу": None}.items()}
++OWN = _alt("наш", "наша", "наше", "наші", "наши", "свій", "своя", "свої", "свой", "свои", "дружній", "дружня",
++           "дружественный", "дружественная")
+ ANOTHER = _alt("ще один", "ще одна", "ще одне", "ещё один", "ещё одна", "еще один", "еще одна", "another")
+ STATIC = _alt("стоїть", "стоит", "стоять", "сидить", "сидит", "висить", "висит", "зависла", "завис", "окопались",
+               "лежить", "лежит", "чекає", "ждет")
+@@ -64,7 +76,10 @@ def _dir_word(w: str) -> str | None:
+ def threat(text: str) -> dict | None:
+     """The vocabulary row for the first threat word in the text (longest phrase wins)."""
+     hit = lang_uk.lookup(text, _INDEX)
+-    return ROWS[int(hit)] if hit is not None else None
++    if hit is not None:
++        return ROWS[int(hit)]
++    t = fold(text)
++    return next((r for rx, r in _OBSTACLE_ROWS if rx.search(t)), None)
+ 
+ 
+ def starts_contact(clause: str) -> bool:
+@@ -97,13 +112,13 @@ OBJECTS = {"bridge": _alt("міст", "мост", "моста", "мосту", "
+            "building": _alt("будівля", "будинок", "здание", "дом")}
+ 
+ 
+-_STATE_INDEX = [(r["detail"], lang_uk.index_of({r["spoken"]: "x"})) for r in ROWS if r["what"] == "obstacle"]
+ _SEVERITY = ["destroyed", "blocked", "damaged", "reopened"]
+ 
+ 
+ def obstacle_state(text: str) -> str | None:
+     """"міст знищено, проїзду нема" names two states; the worst one is the news."""
+-    said = {state for state, index in _STATE_INDEX if lang_uk.lookup(text, index)}
++    t = fold(text)
++    said = {r["detail"] for rx, r in _OBSTACLE_ROWS if rx.search(t)}
+     return next((s for s in _SEVERITY if s in said), None)
+ 
+ 
+@@ -118,7 +133,9 @@ def describe(text: str) -> dict:
+         if w in COUNT_WORDS and COUNT_WORDS[w]:
+             count = count or COUNT_WORDS[w]
+     what = row["what"] if row else ("infantry" if count else "unknown")
++    # "наша пташка над Ромашкою": ours only when the speaker says so, right before the thing itself
+     side = ("hostile" if re.search(rf"\b{HOSTILE}\b", t) or (row and row.get("side") == "hostile")
++            else "friendly" if re.search(rf"\b{OWN}\s+(?:\w+\s+)?{_WORDS}", t)
+             else "neutral" if what == "civilians" else "unknown")
+     head = heading(text)
+     activity = ("firing" if re.search(rf"\b{FIRING}\b", t) else "static" if re.search(rf"\b{STATIC}\b", t)
+diff --git a/backend/extract.py b/backend/extract.py
+index c85764d..d21bfd7 100644
+--- a/backend/extract.py
++++ b/backend/extract.py
+@@ -327,6 +327,9 @@ _PATTERNS = [
+     (r"\b(?:at|in|on|au|aux|a la|a l|sur|dans)\s+(?P<a>.+)", "at"),
+ ]
+ _HOLDING = r"\b(?:holding|hold position|no change|same position|stationary|static|je ne bouge pas|pas de changement|toujours au meme endroit)\b"
++_NOT_SEEN = (r"\b(?:no (?:enemy|enemies|hostiles?|contacts?|movement|activity|sign|sightings?|tanks?|drones?|vehicles?|infantry|troops)"
++             r"|negative (?:contact|sighting)|nothing (?:seen|heard|observed|to report)|aucun ennemi|pas d ennemis?|rien a signaler)\b")
++_HEARSAY = r"\b(?:yesterday|last night|earlier today|(?:was|were|been) reported|reported (?:at|near|in|by|around)|reportedly|rumou?red|hier)\b"
+ _INTENT = r"\b(?:i ll be|i will be|will be at|we ll be|going to be|eta|je serai|nous serons)\b"
+ _PREVIOUS = rf"\bback (?:to )?where (?:i|we) (?:was|were)\s+(?P<n>{_NUM})\s*minutes? ago"
+ _CORRECTION = r"\b(?:correction|negative|negatif|je corrige|je rectifie)\b"
+@@ -508,6 +511,11 @@ def stub_extract(text: str) -> dict:
+         del before
+     t = re.sub(r"\b(?:i m |i am |we re |we are )?not (?:at|near|by|in|on) [^,.;]*", " ", t)
+ 
++    # "no enemy at the Odeon", "nothing seen", "enemy reported at the Pantheon yesterday": a place that is clear, or
++    # somebody else's old news. Neither is a sighting and neither says where the speaker is: the phrase is dropped.
++    t = ", ".join(seg for seg in re.split(r"\s*(?:[,;]|\.(?!\d))\s*", t) if seg and not re.search(_NOT_SEEN, seg)
++                  and not re.search(_HEARSAY, seg))
++
+     # "bearing 045, 300 metres from the church": one clue, though said with a pause
+     t = re.sub(r"\b((?:bearing|azimuth|azimut|cap)\s+[\w ]{1,30}?(?:degrees?|mils?)?)\s*,\s*(?=[\w ]{1,30}?(?:from|de|du)\b)", r"\1 ", t)
+     intent = bool(re.search(_INTENT, t))
+diff --git a/backend/lang_uk.py b/backend/lang_uk.py
+index c8a8569..f69168e 100644
+--- a/backend/lang_uk.py
++++ b/backend/lang_uk.py
+@@ -652,6 +652,38 @@ def _joins(text: str) -> str:
+                   flags=re.I)
+ 
+ 
++# "біля Сараю противника немає", "не бачу нікого", "біля Сараю чисто": a statement that something is NOT there. And
++# "вчора там бачили танк", "кажуть, що ...": somebody else's old news. Neither is a sighting, and neither says where
++# the speaker is, so neither may put an enemy on the map or move the unit.
++NEGATED = _alt("нема", "немає", "нет", "нету", "не бачу", "не вижу", "не спостерігаю", "не наблюдаю", "не виявлено",
++               "не обнаружено", "чисто", "відсутній", "відсутні", "отсутствует", "отсутствуют", "нікого", "никого")
++HEARSAY = _alt("вчора", "вчера", "позавчора", "позавчера", "кажуть", "говорят", "повідомляли", "сообщали",
++               "за даними", "по данным", "раніше бачили", "раньше видели")
++# The clock method: "на третій годині від мене Сарай, метрів сто", "ждун на дванадцяту годину, двісті метрів".
++# Twelve o'clock is the way the speaker faces, which the net does not know, so only the distance is used: a ring.
++CLOCK = rf"\bна\s+\S+\s+(?:{_alt('годині', 'годину', 'години', 'час', 'часа', 'часов')})\b(?:\s+(?:вид|от)\s+мен\w+)?"
++
++
++def _known_callsign(word: str) -> str | None:
++    f = fold(word)
++    if any(same_word(f, fold(n)) and abs(len(f) - len(fold(n))) <= 2 for n in callsign_names()):
++        return callsign(word)
++    return None
++
++
++def _metres(text: str) -> float | None:
++    m = re.search(_DIST, text)
++    return number(m["d1"] or m["d2"]) if m else None
++
++
++def _offset(report: dict, text: str) -> None:
++    """"стою возле Сарая, метрів п'ятдесят на північ": a distance and a direction said after the place refine it."""
++    m = re.search(rf"{_DIST}\s*(?:на\s+|к\s+)?(?P<dir>{_DIR})\b(?!\s+(?:вид|от)\b)", text)
++    rel = relation_of(m["dir"]) if m else None
++    if rel and report.get("relation") in ("near", "at") and not report.get("distance_m"):
++        report["relation"], report["distance_m"] = rel, number(m["d1"] or m["d2"])
++
++
+ def stub_extract_uk(text: str) -> dict:
+     """Rule-based fallback for Ukrainian/Russian radio reports: the closed demo grammar (header, corrections,
+     holding, eight directions, distances, between/near/behind/at, movement). Free speech needs the language model."""
+@@ -668,17 +700,49 @@ def stub_extract_uk(text: str) -> dict:
+     # before it is the speaker's own position.
+     from . import contact_uk
+     clauses = [c.strip() for c in re.split(r"\s*[,.;!?]\s*", t) if c.strip()]
++    # Not there, or not first-hand: dropped (unless it is the state of a place: "міст знищено, проїзду нема").
++    clauses = [c for c in clauses if not re.search(rf"\b(?:{NEGATED}|{HEARSAY})\b", c)
++               or (contact_uk.threat(c) or {}).get("what") == "obstacle"]
+     seen = next((i for i, c in enumerate(clauses) if contact_uk.starts_contact(c)), None)
+     sightings = []
+     if seen is not None:
+-        sightings.append(contact_uk.report(", ".join(clauses[seen:]), speaker))
+-        clauses = clauses[:seen]
++        said = ", ".join(clauses[seen:])
++        s = contact_uk.report(said, speaker)
++        c, located = s["contact"], bool((s.get("anchor") or {}).get("name"))
++        if re.search(CLOCK, said):   # "ждун на дванадцяту годину, двісті метрів": that far from the reporter, way unknown
++            s.update(anchor={"name": speaker or "me", "kind": "unit"}, anchor2=None, relation="from",
++                     distance_m=_metres(re.sub(CLOCK, " ", said)), relative_to_reporter=True, vague=True)
++            located = True
++        if c["what"] == "unknown" and c["side"] == "unknown" and not c["count"] and not located:
++            # "..., наблюдаю": a watching word with nothing named and nowhere said is not a sighting
++            clauses = [x for x in (re.sub(rf"\b{contact_uk.TRIGGER}\b", " ", y).strip() for y in clauses) if x]
++        else:
++            if not located and seen > 0 and any(parse_location(x) for x in clauses[:seen]):
++                # "на Орієнтирі три, міну бачу": no place of its own, so it is where the speaker just said he is
++                s.update(anchor={"name": speaker or "me", "kind": "unit"}, relation="at", relative_to_reporter=True, vague=True)
++            sightings.append(s)
++            clauses = clauses[:seen]
+     # "не озеро": what it is not. But "не доходячи до X" (just short of X) is a place.
+     t = re.sub(r"\bне\s+(?!доход|доиждж|доезж|дойд)[^,.;]*", " ", ", ".join(clauses))
+     intent = bool(re.search(rf"\b{INTENT}\b", t))
+-    reports = []
++    reports, subjects = [], set()
+     for clause in filter(None, (c.strip() for c in re.split(r"\s*[,.;!?]\s*", t))):
+-        r = parse_location(clause)
++        # "Сокіл на Сараї, я на Ромашці": a clause that opens with another callsign is about that unit
++        first, _, rest = clause.partition(" ")
++        subject = _known_callsign(first) if rest else None
++        if subject and subject != speaker and parse_location(rest):
++            clause = rest
++        else:
++            subject = None
++            clause = re.sub(r"^я\s+(?=\S)", "", clause)
++        if subject in subjects:
++            continue
++        cm = re.search(CLOCK + r"\s*(?P<a>[^,.;]*)", clause)
++        if cm and _anchor(cm["a"]):   # "на третій годині від мене Сарай, метрів сто": 100 m from Сарай, way unknown
++            r = {"subject": None, "type": "position", "anchor": _anchor(cm["a"]), "anchor2": None, "relation": "from",
++                 "distance_m": _metres(re.sub(CLOCK, " ", t)), "minutes_ago": None, "confidence": 0.4, "vague": True}
++        else:
++            r = parse_location(clause)
+         if r is None and re.search(rf"\b{HOLDING}\b", clause):
+             r = {"subject": None, "type": "holding", "anchor": None, "anchor2": None, "relation": "at",
+                  "distance_m": None, "minutes_ago": None, "confidence": 0.6}
+@@ -688,8 +752,11 @@ def stub_extract_uk(text: str) -> dict:
+             r["type"] = "intent"
+         elif correction and r["type"] != "holding":
+             r["type"] = "correction"
+-        reports.append(r)
+-        break   # one location per transmission in the demo grammar; the model handles more
++        if r["type"] == "position" and subject is None:
++            _offset(r, t)
++        r["subject"] = subject
++        subjects.add(subject)
++        reports.append(r)   # one location per unit named in the transmission
+     reports = sightings + reports
+     if not reports:
+         reports = [{"subject": None, "type": "other", "anchor": None, "anchor2": None, "relation": "at",
+diff --git a/backend/stt.py b/backend/stt.py
+index 7e59c02..201d727 100644
+--- a/backend/stt.py
++++ b/backend/stt.py
+@@ -39,6 +39,16 @@ _whisper = None
+ PROMPTS = {"en": "Radio position report. Places: ", "fr": "Compte rendu radio de position. Lieux : ",
+            "uk": "Радіообмін. Вежа, я Сокіл, прийом. Позивні та орієнтири: ",
+            "ru": "Радиообмен. Башня, я Сокол, приём. Позывные и ориентиры: "}
++
++
++def _prompt(language: str | None, vocabulary: list[str]) -> str:
++    """Auto language on a Ukrainian net: an English prompt pulls Whisper towards transliteration, so go by the
++    script of the callsigns and codenames it is being primed with."""
++    if language is None and any("\u0400" <= ch <= "\u04ff" for w in vocabulary[:40] for ch in w):
++        return PROMPTS["uk"]
++    return PROMPTS.get(language, PROMPTS["en"])
++
++
+ _whisper_lock = threading.Lock()
+ # One thread owns the model, so two quick presses queue rather than compete for the CPU.
+ _whisper_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="whisper")
+@@ -173,7 +183,7 @@ async def _gemini(audio: bytes, vocabulary: list[str], language: str | None) ->
+ async def _local(audio: bytes, vocabulary: list[str], language: str | None) -> str:
+     def run() -> str:
+         segments, _ = _load_whisper().transcribe(_pcm(audio), language=language, vad_filter=True,
+-                                          initial_prompt=PROMPTS.get(language, PROMPTS["en"]) + ", ".join(vocabulary[:40]))
++                                          initial_prompt=_prompt(language, vocabulary) + ", ".join(vocabulary[:40]))
+         return " ".join(s.text for s in segments)
+ 
+     return await asyncio.get_running_loop().run_in_executor(_whisper_thread, run)
+diff --git a/data/demo_net_battle.jsonl b/data/demo_net_battle.jsonl
+index 72090b2..72372b9 100644
+--- a/data/demo_net_battle.jsonl
++++ b/data/demo_net_battle.jsonl
+@@ -13,7 +13,7 @@
+ {"t": 104, "text": "Плюс, Граніт."}
+ {"t": 115, "text": "Лис, я Вежа, висувайся до Орієнтиру три, обережно, там міна на стежці, прийом."}
+ {"t": 120, "text": "Вежа, я Лис, плюс, висуваюсь, прийом."}
+-{"t": 175, "text": "Вежа, я Лис, на Орієнтирі три, обходжу, прийом."}
++{"t": 175, "text": "Вежа, я Лис, на Орієнтирі три, міну бачу, обходжу, прийом."}
+ {"t": 195, "text": "Башня, я Сокол, противник, трое, восточнее Ромашки метров двести, двигаются на юг, приём."}
+ {"t": 205, "text": "Вежа, я Лис, мопед пройшов над Люксембурзьким палацом на захід, прийом."}
+ {"t": 215, "text": "Вежа, я Граніт, ворожий танк біля Сараю, стоїть, прийом."}
+diff --git a/data/threat_vocab.csv b/data/threat_vocab.csv
+index 5f7bc9f..a462fef 100644
+--- a/data/threat_vocab.csv
++++ b/data/threat_vocab.csv
+@@ -131,3 +131,7 @@ fpv,en,drone,FPV,90,,check,
+ можна їхати,uk,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+ проход открыт,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
+ можно ехать,ru,obstacle,reopened,86400,,check,state of a place (bridge road building); stays until reported open
++міну,uk,ied,mine,21600,,sourced,case form of міна
++мину,ru,ied,mine,21600,,sourced,case form of мина
++мины,ru,ied,mine,21600,,sourced,case form of мина
++розтяжку,uk,ied,tripwire,21600,,sourced,case form of розтяжка
+diff --git a/tests/test_place_status.py b/tests/test_place_status.py
+index 1e65d80..e620b35 100644
+--- a/tests/test_place_status.py
++++ b/tests/test_place_status.py
+@@ -84,3 +84,10 @@ def test_a_destroyed_tank_is_still_a_tank_and_all_clear_is_not_an_obstacle():
+     _, events, _ = run(["Zero, this is Bravo one, contact, enemy tank destroyed at the Odeon theatre, over",
+                         "Zero, this is Bravo one, all clear at the Medici fountain, over"])
+     assert events[0]["contact"]["what"] == "tank" and events[1]["type"] == "position"
++
++
++@pytest.mark.parametrize("line", ["Башня, я Лис, перекресток возле Сарая, приём.", "Вежа, я Лис, перехрестя біля Сараю, прийом."])
++def test_a_crossroads_is_not_a_blocked_road(line):
++    """"перекресток" must not be taken for "перекрыт": state words are matched strictly."""
++    _, events, _ = run([line])
++    assert [e["type"] for e in events] == ["position"] and events[0]["anchor"] == "Сарай"
+diff --git a/tests/test_review_round_2.py b/tests/test_review_round_2.py
+new file mode 100644
+index 0000000..d6b4df6
+--- /dev/null
++++ b/tests/test_review_round_2.py
+@@ -0,0 +1,94 @@
++"""Findings from a read-through of the rules path: things that put a unit or an enemy in the wrong place."""
++import asyncio
++
++import pytest
++
++from backend.geo import Gazetteer
++from backend.tracker import Tracker
++
++
++@pytest.fixture(autouse=True)
++def rules_only(monkeypatch):
++    for key in ("GEMINI_API_KEY", "MISTRAL_API_KEY"):
++        monkeypatch.delenv(key, raising=False)
++
++
++def run(lines, step=60):
++    async def go():
++        tracker, t, out = Tracker(Gazetteer(), log=None), 1e6, []
++        for line in lines:
++            out.append(await tracker.ingest(line, None, now=t))
++            t += step
++        return tracker, out, t
++    return asyncio.run(go())
++
++
++def where(tracker, t):
++    return {e["callsign"]: e["anchor"] for e in tracker.picture(now=t) if e.get("type") != "contact"}
++
++
++def contacts(tracker, t):
++    return [e for e in tracker.picture(now=t) if e.get("type") == "contact"]
++
++
++def test_two_units_in_one_call_each_get_their_own_place():
++    tracker, _, t = run(["Вежа, я Лис, Сокіл на Сараї, я на Ромашці, прийом."])
++    assert where(tracker, t) == {"сокіл": "Сарай", "лис": "Ромашка"}
++
++
++@pytest.mark.parametrize("first, second, stays", [
++    ("Zero, this is Alpha two, at the town hall, over",
++     "Zero, this is Alpha two, enemy reported at the Pantheon yesterday, nothing seen now, over", "Mairie du 6e arrondissement"),
++    ("Zero, this is Alpha two, at the town hall, over",
++     "Zero, this is Alpha two, no enemy at the Odeon theatre, over", "Mairie du 6e arrondissement"),
++    ("Вежа, я Лис, на Ромашці, прийом.", "Вежа, я Лис, біля Сараю противника немає, прийом.", "Ромашка"),
++    ("Вежа, я Лис, на Ромашці, прийом.", "Вежа, я Лис, біля Сараю чисто, прийом.", "Ромашка"),
++    ("Вежа, я Лис, на Ромашці, прийом.", "Вежа, я Лис, вчора біля Сараю бачили танк, прийом.", "Ромашка"),
++])
++def test_negation_and_hearsay_move_nobody_and_plot_no_enemy(first, second, stays):
++    tracker, _, t = run([first, second])
++    assert list(where(tracker, t).values()) == [stays] and contacts(tracker, t) == []
++
++
++def test_a_watching_word_alone_is_not_a_contact():
++    tracker, out, t = run(["Башня, я Лис, полтораста метров западнее Сарая, наблюдаю, приём."])
++    assert contacts(tracker, t) == [] and len(out[0]) == 1
++    assert out[0][0]["anchor"] == "Сарай" and out[0][0]["parsed"]["relation"] == "west_of"
++
++
++def test_a_sighting_with_no_place_of_its_own_is_where_the_speaker_is():
++    tracker, out, t = run(["Вежа, я Лис, на Орієнтирі три, міну бачу, обходжу, прийом."])
++    mine = contacts(tracker, t)
++    assert len(mine) == 1 and mine[0]["contact"]["what"] == "ied" and mine[0]["ok"]
++    assert where(tracker, t) == {"лис": "Орієнтир 3"}
++
++
++def test_offset_said_after_the_place_is_kept():
++    _, out, _ = run(["Вежа, я Граніт, стою возле Сарая, метрів п'ятдесят на північ, прийом."])
++    p = out[0][0]["parsed"]
++    assert out[0][0]["anchor"] == "Сарай" and p["relation"] == "north_of" and p["distance_m"] == 50
++
++
++def test_clock_method_gives_a_ring_not_a_point():
++    tracker, out, t = run(["Вежа, я Лис, на Ромашці, прийом.",
++                           "Вежа, я Лис, ждун на дванадцяту годину, двісті метрів, прийом."])
++    drone = out[1][0]
++    assert drone["type"] == "contact" and drone["ok"] and drone["anchor"] == "лис"
++    assert drone["parsed"]["relation"] == "from" and drone["parsed"]["distance_m"] == 200
++    assert where(tracker, t) == {"лис": "Ромашка"}
++    _, out, _ = run(["Вежа, я Лис, на третій годині від мене Сарай, метрів сто, прийом."])
++    assert out[0][0]["anchor"] == "Сарай" and out[0][0]["parsed"]["relation"] == "from" and out[0][0]["parsed"]["distance_m"] == 100
++
++
++@pytest.mark.parametrize("line", ["Вежа, я Лис, наша пташка над Ромашкою, прийом.",
++                                  "Zero, this is Alpha two, our drone over the town hall, over"])
++def test_our_own_drone_is_friendly_and_warns_nobody(line):
++    tracker, out, t = run(["Вежа, я Сокіл, на Ромашці, прийом.", "Zero, this is Bravo one, at the town hall, over", line])
++    c = out[2][0]
++    assert c["contact"]["side"] == "friendly" and c["threats"] == []
++
++
++def test_a_distance_from_our_position_does_not_make_the_enemy_friendly():
++    _, out, _ = run(["Zero, this is Alpha two, at the town hall, over",
++                     "Zero, this is Alpha two, contact, enemy tank 300 metres east of our position, over"])
++    assert out[1][0]["contact"]["side"] == "hostile"
+-- 
+2.43.0
+
